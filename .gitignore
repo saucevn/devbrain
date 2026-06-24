@@ -1,0 +1,21 @@
+.DS_Store
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# node / next
+node_modules/
+/web/.next/
+/web/out/

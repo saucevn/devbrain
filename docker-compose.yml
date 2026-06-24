@@ -1,0 +1,105 @@
+name: dev-second-brain
+
+# DATABASE_URL được DỰNG từ POSTGRES_* (single source cho mật khẩu → tránh
+# lệch giữa connection string và mật khẩu của container db).
+x-db-env: &db-env
+  DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-secondbrain}
+
+services:
+  # ----- Postgres + pgvector (LOCAL, trong compose) --------------------
+  db:
+    image: pgvector/pgvector:pg16          # multi-arch: chạy cả amd64 (VPS) lẫn arm64 (Mac)
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-secondbrain}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      # Auto-apply migration LẦN ĐẦU khi volume rỗng (thứ tự alphabet:
+      # 000 roles → 001 schema → 002 idempotency). Đổi schema sau này
+      # phải migrate tay (init-scripts chỉ chạy khi DB còn trống).
+      - ./supabase/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-secondbrain}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ----- Redis (queue cho ARQ) -----------------------------------------
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ----- Webhook receiver (FastAPI) ------------------------------------
+  receiver:
+    build: ./pipeline
+    command: uvicorn pipeline:app --host 0.0.0.0 --port 8000
+    environment: *db-env
+    env_file: .env
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+    restart: unless-stopped
+
+  # ----- Projector worker (ARQ sweep) ----------------------------------
+  worker:
+    build: ./pipeline
+    command: arq pipeline.WorkerSettings
+    environment: *db-env
+    env_file: .env
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+    restart: unless-stopped
+
+  # ----- Backup sidecar: pg_dump → R2 định kỳ --------------------------
+  backup:
+    build: ./backup
+    environment:
+      <<: *db-env
+      R2_ENDPOINT: ${R2_ENDPOINT}
+      R2_BUCKET: ${R2_BUCKET}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-auto}
+      BACKUP_INTERVAL: ${BACKUP_INTERVAL:-86400}   # giây; mặc định 24h
+    depends_on:
+      db: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ----- Cloudflare Tunnel (expose receiver, không cần public IP) -------
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      receiver: { condition: service_started }
+    restart: unless-stopped
+
+  # ----- Frontend (OPT-IN) ---------------------------------------------
+  # Mặc định KHÔNG chạy (dành cho deploy lên Cloudflare Pages).
+  # Self-host toàn bộ: docker compose --profile frontend up -d
+  web:
+    build: ./web
+    environment: *db-env
+    env_file: .env
+    ports:
+      - "3000:3000"
+    depends_on:
+      db: { condition: service_healthy }
+    profiles: ["frontend"]
+    restart: unless-stopped
+
+volumes:
+  pg-data:
+  redis-data:
