@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import re
 from typing import Any, Literal
@@ -48,8 +49,12 @@ from pydantic import BaseModel, Field
 # =====================================================================
 DATABASE_URL   = os.environ["DATABASE_URL"]            # Supabase Postgres (pooler hoặc direct)
 REDIS_URL      = os.environ.get("REDIS_URL", "redis://localhost:6379")
-GITHUB_SECRET  = os.environ["GITHUB_WEBHOOK_SECRET"].encode()
-ANTHROPIC_KEY  = os.environ["ANTHROPIC_API_KEY"]
+# Receiver/worker secrets are read tolerantly so this module is importable by
+# deterministic tools (vd backfill.py) that don't need the webhook/AI lanes.
+# The processes that actually use them (receiver HMAC, AI summarize) still set
+# them via env in compose.
+GITHUB_SECRET  = os.environ.get("GITHUB_WEBHOOK_SECRET", "").encode()
+ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
 
 MODEL_SUMMARY  = "claude-haiku-4-5-20251001"   # C3: rẻ/nhanh cho bulk PR summary
 MODEL_ROLLUP   = "claude-sonnet-4-6"           # C3: mạnh cho nhật ký định kỳ
@@ -68,9 +73,20 @@ anthropic = AsyncAnthropic(api_key=ANTHROPIC_KEY)
 # =====================================================================
 # DB POOL  (đăng ký codec pgvector để truyền list[float] thẳng vào cột vector)
 # =====================================================================
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    # pgvector codec: truyền list[float] thẳng vào cột vector.
+    await register_vector(conn)
+    # jsonb codec: truyền/nhận dict cho cột jsonb (events.payload, ...).
+    # KHÔNG có codec này thì asyncpg để jsonb dạng text → insert dict lỗi và
+    # projector không .get() được payload khi đọc. Bắt buộc cho cả 2 lane.
+    await conn.set_type_codec(
+        "jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
+    )
+
+
 async def make_pool() -> asyncpg.Pool:
     return await asyncpg.create_pool(
-        DATABASE_URL, min_size=2, max_size=10, init=register_vector
+        DATABASE_URL, min_size=2, max_size=10, init=_init_connection
     )
 
 
@@ -101,6 +117,17 @@ async def _startup():
     app.state.pool = await make_pool()
     from arq import create_pool as arq_pool
     app.state.arq = await arq_pool(RedisSettings.from_dsn(REDIS_URL))
+
+
+@app.get("/health")
+async def health():
+    """Liveness/readiness cho receiver. Ping DB rẻ; ACK thừa sức < 10s."""
+    db_ok = False
+    try:
+        db_ok = await app.state.pool.fetchval("select 1") == 1
+    except Exception:
+        db_ok = False
+    return {"ok": True, "db": db_ok}
 
 
 @app.post("/webhooks/github")
