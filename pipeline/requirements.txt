@@ -1,0 +1,10 @@
+# Backend pipeline deps — derived from pipeline.py imports.
+# Receiver (FastAPI) + worker (ARQ) run from this same image.
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30
+arq>=0.26
+asyncpg>=0.30
+pgvector>=0.3.6
+anthropic>=0.40
+httpx>=0.27
+pydantic>=2.7,<3
