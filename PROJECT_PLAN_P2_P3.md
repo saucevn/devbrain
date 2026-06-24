@@ -172,3 +172,62 @@ Quà free từ event-sourcing: events bất biến + projection replayable → t
 
 - **Co-change phình ở commit lớn:** commit "initial import" sinh C(n,2) cạnh weight=1. Cân nhắc bỏ qua co-change cho commit đụng > N file (vd 50) trong `apply_cochange`. Dashboard order theo `weight desc` nên cạnh có ý nghĩa vẫn nổi — đây là tối ưu, không phải bug.
 - **`embed()` mismatch cũ** (voyage-3=1024 vs `EMBED_DIM`/`vector`=1536): **giải bằng chính việc rewrite sang Gemini@1536** ở bước 3 — không cần migrate schema.
+
+---
+
+## 6. Bổ sung từ prototype "Dev Team Brain"
+
+Trích từ prototype UI (artifact). Phân loại: ✅ **fold** vào PLAN · ❌ **rejected** (vi phạm golden rule). Mục này **cập nhật/mở rộng** §0–§3 ở trên.
+
+### 6.1 Nguồn mới (mở rộng §0.1)
+
+| Nguồn | Tín hiệu prototype | event_type | Lane |
+|---|---|---|---|
+| **CI/CD + Deploy** | "Build health 94% · CI/CD success rate"; block "Build Health"; "Deploy · Production v1.8.2" | `github` · `ci.run` / `deploy.succeeded` | Deterministic (build-health) |
+| **Bug** | "Bug cycle 2.1d · detect → fixed"; "Bug Intelligence"; node "Bugs Fixed"; "BUG-421" | `github` · `bug.opened`/`bug.fixed` (hoặc dùng `issue.*` có label `bug`) | Deterministic (cycle-time) |
+
+- CI/CD **không phải vendor mới** — vẫn là GitHub Actions webhook: subscribe `workflow_run` / `check_suite` / `deployment_status`. Enrich/normalize trong **worker** (golden rule #9). Metric = CI success rate (deterministic).
+- Bug lane: theo dõi open→close → ghi `status_history` + tính **cycle-time** (detect→fixed). "Rule cảnh báo regression" = optional, để sau.
+
+### 6.2 Metric / KPI (deterministic, mở rộng §2/§3)
+
+- **Grain "sprint"**: cấu hình ranh giới sprint → cửa sổ cho KPI + rollup. Đổi rollup Phase 5 từ "tuần" → **per-sprint** ("Báo cáo sprint").
+- **KPI scorecard band** (4 số top-line, trên heatmap): **Velocity** (throughput vs previous sprint) · **Build health** (CI success rate) · **Bug cycle** (mean detect→fixed) · **Knowledge coverage** (% feature có link doc).
+- **Knowledge coverage** = `#feature có ≥1 link doc / #feature`, đếm deterministic từ entity↔doc (link do lane AI tạo, đếm thuần). Cũng phản ánh ở block "Docs Sync"/"Feature Registry".
+
+> ⚠️ **GUARDRAIL Golden Rule #3 — ghi ngay cạnh KPI/Velocity:** mọi KPI là **team-aggregate, throughput/process, deterministic**. TUYỆT ĐỐI **không** per-person, **không** AI-score, **không** ranking. "Velocity" = lượng PR/feature ship được ở mức team, không quy về cá nhân.
+
+### 6.3 Pyramid — mở rộng §2.1 (P3)
+
+- Mỗi block thêm: **maturity %** + **risk class** (`Low risk` / `In progress` / `Critical asset`) — **human-curated** (nằm trong `pyramid_blocks`, không AI-score, không re-derive → R2-backup-protected).
+- **Toggle chiều heat:** `Maturity` (curated) ↔ `Activity` (commit 30d, deterministic).
+- Block names tham khảo từ prototype: Source Index · Docs Sync · Observability · Release Ledger · Bug Intelligence · Build Health · Feature Registry · AI Summary · Knowledge Graph · Team Brain.
+
+### 6.4 Knowledge graph — mở rộng Phase 4
+
+- Bổ sung node kind: **`release`** · **`plan`** · **`person`**.
+- **`person`** ("Contributors") = chạm câu hỏi mở [PROJECT_PLAN §10.1](PROJECT_PLAN.md) (person identity): map thẳng `actor` thô trước, mở rộng `person` entity + aliases sau. **Person KHÔNG kèm điểm/score** (golden rule #3) — chỉ là node liên kết, không xếp hạng.
+
+### 6.5 Evidence Ledger — surface citation hạng nhất (✅ rất nên)
+
+- "Link & nguồn tham chiếu": mỗi insight/narrative liên kết **source thật** với nút **Open**. Source types: **GitHub** (PR) · **Deploy** (release) · **Docs** (ADR) · **Bug**.
+- Đây là **hiện thực của golden rule** "AI luôn kèm source link để verify" và là **nền cho hướng #1 (MCP ask-the-brain có dẫn chứng)**. Dữ liệu đã sẵn: `narratives.source_event_ids`, `embeddings`→event, `events.source_url`.
+
+### 6.6 AI report — mở rộng Phase 5 rollup
+
+- Cấu trúc **2 mục: Highlights + Risks & next actions** (Sonnet, scope per-sprint). **Mọi dòng kèm citation** từ Evidence Ledger.
+- **"source confidence score cho từng insight AI"** = độ tin cậy **output AI** (✅ hợp lệ — KHÔNG phải chấm người); hiển thị cạnh narrative, optional.
+
+### 6.7 ADR doc-type
+
+- **ADR** (Architecture Decision Record, vd `ADR-009`) là doc-type hạng nhất trong nguồn docs (Lark/import/GitHub) → **decision-log / ADR registry** (khớp hướng leverage). `canonical_key` neo vào ADR id.
+
+### 6.8 ❌ Rejected — Contribution scoring (vi phạm Golden Rule #3)
+
+- Panel **"Đóng góp theo người / module"** với điểm so sánh (Backend **86** · Frontend **78** · DevOps **73** · QA **69**) và roadmap **"Contribution map"** = **chấm/xếp hạng đóng góp** → **KHÔNG đưa vào**. Đây đúng **non-goal #1** của PROJECT_PLAN.
+- **Reframe deterministic (nếu cần, mặc định bỏ):** "Activity by area" = đếm số file/PR chạm theo **module** ở mức **team**, **không điểm so sánh**, **không quy về người**.
+
+### 6.9 Tự xác nhận từ chính prototype
+
+- "Risks & next actions" của prototype tự nhắc *"tách event ingestion worker để tránh nghẽn khi import lịch sử commit lớn"* → trùng **golden rule #9** + phụ lục §5 (co-change cap). Giữ nguyên hướng.
+- Roadmap tương lai của prototype (AI report engine · Predictive roadmap · Auto release narrative · **Architecture copilot**) — "Architecture copilot" ≈ **hướng #1 (MCP cho Claude Code)**. Khớp tầm nhìn §3.
