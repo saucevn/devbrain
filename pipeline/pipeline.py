@@ -33,6 +33,7 @@ import hmac
 import json
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 import asyncpg
@@ -171,23 +172,34 @@ async def github_webhook(
     return {"ok": True, "stored": row is not None}
 
 
-def normalize_github(event: str, p: dict) -> tuple[str, str, str | None, str | None]:
-    """Map webhook GitHub → (event_type 'noun.verb', occurred_at, actor, url)."""
+def normalize_github(event: str, p: dict) -> tuple[str, datetime, str | None, str | None]:
+    """Map webhook GitHub → (event_type 'noun.verb', occurred_at, actor, url).
+    occurred_at is a tz-aware datetime — it lands in a timestamptz column, so it
+    must NOT be a string."""
     if event == "pull_request" and p.get("action") == "closed" and p["pull_request"].get("merged"):
         pr = p["pull_request"]
-        return "pr.merged", pr["merged_at"], pr["user"]["login"], pr["html_url"]
+        return "pr.merged", _parse_ts(pr.get("merged_at")), pr["user"]["login"], pr["html_url"]
     if event == "release" and p.get("action") == "published":
         r = p["release"]
-        return "release.tagged", r["published_at"], r["author"]["login"], r["html_url"]
+        return "release.tagged", _parse_ts(r.get("published_at")), r["author"]["login"], r["html_url"]
     if event == "push":
-        return "commit.pushed", p["head_commit"]["timestamp"], p["pusher"]["name"], p["compare"]
+        # head_commit is null on branch-delete / tag pushes → guard.
+        hc = p.get("head_commit") or {}
+        actor = (p.get("pusher") or {}).get("name")
+        return "commit.pushed", _parse_ts(hc.get("timestamp")), actor, p.get("compare")
     # ... thêm issue.resolved, doc.updated tuỳ nguồn
-    return f"{event}.raw", p.get("created_at") or _now_iso(), None, None
+    return f"{event}.raw", _parse_ts(p.get("created_at")), None, None
 
 
-def _now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+def _parse_ts(s: str | None) -> datetime:
+    """Parse an ISO-8601 timestamp (GitHub uses a trailing 'Z') into a tz-aware
+    datetime; fall back to now(UTC) when missing or unparseable."""
+    if not s:
+        return datetime.now(timezone.utc)
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.now(timezone.utc)
 
 
 # =====================================================================
@@ -228,8 +240,25 @@ def passes_ai_gate(ev: asyncpg.Record) -> bool:
 
 
 def changed_files(payload: dict) -> list[str]:
+    """File paths touched by an event. Handles three payload shapes:
+    enriched PR (`pull_request._files`), backfill (`files`), and a raw GitHub
+    `push` (union of each commit's added/modified/removed, de-duped in order)."""
     pr = payload.get("pull_request") or {}
-    return [f["filename"] for f in (pr.get("_files") or payload.get("files") or [])]
+    files = pr.get("_files") or payload.get("files")
+    if files:
+        return [f["filename"] for f in files]
+    commits = payload.get("commits")
+    if commits:
+        seen: set[str] = set()
+        paths: list[str] = []
+        for c in commits:
+            for key in ("added", "modified", "removed"):
+                for path in c.get(key) or []:
+                    if path not in seen:
+                        seen.add(path)
+                        paths.append(path)
+        return paths
+    return []
 
 
 # =====================================================================
