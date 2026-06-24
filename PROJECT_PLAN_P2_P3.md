@@ -172,6 +172,7 @@ Quà free từ event-sourcing: events bất biến + projection replayable → t
 
 - **Co-change phình ở commit lớn:** commit "initial import" sinh C(n,2) cạnh weight=1. Cân nhắc bỏ qua co-change cho commit đụng > N file (vd 50) trong `apply_cochange`. Dashboard order theo `weight desc` nên cạnh có ý nghĩa vẫn nổi — đây là tối ưu, không phải bug.
 - **`embed()` mismatch cũ** (voyage-3=1024 vs `EMBED_DIM`/`vector`=1536): **giải bằng chính việc rewrite sang Gemini@1536** ở bước 3 — không cần migrate schema.
+- **⚠️ Latent dup webhook↔backfill (cần fix):** webhook `push` key theo `X-GitHub-Delivery` (1 event/push, gộp N commit), còn `backfill.py` key theo `sha` (1 event/commit) → cùng commit nạp **cả hai đường** bị **đếm 2 lần** vào `metrics_daily`/co-change — `unique(source, source_event_id)` không chặn vì `source` lẫn key đều khác. Đây là latent bug **có sẵn** (không do CLI; CLI chỉ làm dễ xảy ra hơn). Fix = **transport-independent commit identity** (xem §7.6): fan-out webhook per-commit + dùng chung `source='git'`/`sha`.
 
 ---
 
@@ -274,7 +275,8 @@ Nguồn: [codegraph](https://github.com/colbymchenry/codegraph) — code knowled
 ### 7.6 Golden-rule & rủi ro
 - ✅ Symbol graph = facts tree-sitter → `derived_by='git'`, **không AI-score, không chấm người**.
 - ✅ `.devbrain/graph.db` = projection **disposable, rebuildable** (Rule #2).
-- ✅ Idempotency xuyên đường: commit event **luôn** dùng `sha` làm `source_event_id` → repo có cả webhook + CLI **không double-count** (cursor + UPSERT lo phần còn lại).
+- ✅ **Transport-independent commit identity:** danh tính của một commit là **`sha`**, **không** phụ thuộc đường vận chuyển (webhook / backfill / CLI). Chuẩn hóa **mọi** event nguồn-commit về **1 event / commit**, dùng chung namespace — `source='git'` + `source_event_id=sha` — để `unique(source, source_event_id)` dedup **xuyên đường**; repo bật cả webhook + CLI vẫn **không** double-count (cursor + UPSERT lo phần còn lại).
+  - Việc cần làm: đổi handler webhook `push` để **fan-out 1 event / commit theo `sha`** (payload đã có `commits[].id`) thay vì 1 event / delivery. Fan-out chỉ vài insert → giữ ACK <10s (push lớn thì enqueue). PR/release/doc **không bị** (chỉ đến từ webhook, key tự nhiên riêng) — vấn đề **chỉ ở commit**.
 - ⚠️ **Không push từng symbol làm event** vào central log (nổ volume, sai bản chất "facts"). Symbol graph ở **local**; central chỉ nhận activity events + (optional) edge `depends_on` mức **module** đã tổng hợp.
 - ⚠️ Không để local graph thành source-of-truth thứ hai.
 
