@@ -231,3 +231,52 @@ Trích từ prototype UI (artifact). Phân loại: ✅ **fold** vào PLAN · ❌
 
 - "Risks & next actions" của prototype tự nhắc *"tách event ingestion worker để tránh nghẽn khi import lịch sử commit lớn"* → trùng **golden rule #9** + phụ lục §5 (co-change cap). Giữ nguyên hướng.
 - Roadmap tương lai của prototype (AI report engine · Predictive roadmap · Auto release narrative · **Architecture copilot**) — "Architecture copilot" ≈ **hướng #1 (MCP cho Claude Code)**. Khớp tầm nhìn §3.
+
+---
+
+## 7. devbrain CLI (lấy cảm hứng từ codegraph)
+
+Nguồn: [codegraph](https://github.com/colbymchenry/codegraph) — code knowledge graph **local-first** (tree-sitter → SQLite `.codegraph/codegraph.db` WAL+FTS5, FS-watcher sync debounce 2s, MCP `codegraph_explore` cho AI agent: surgical context, call paths, blast-radius; publish npm). Mượn **delivery model (CLI publish + MCP)** và **granularity AST-symbol**, nhưng phải hòa giải với event-sourcing.
+
+> **⚠️ Điểm hòa giải cốt lõi:** central event log lưu *"what happened"* (commit/PR/doc facts), **KHÔNG lưu source code** → **không rebuild được symbol graph từ central events**. Symbol graph là *"what is"* (snapshot AST), cần source thật → **dựng tại local (CLI)**. Nó là **projection deterministic, disposable** (Golden Rule #2); central brain chỉ nhận **activity events** + (optional) edge đã tổng hợp. Đây là cách mượn codegraph mà **không** tạo source-of-truth thứ hai.
+
+### 7.1 Mô hình: CLI = ingestion client + local AST companion
+- CLI **không chạm DB**. Hai vai: **(1) ingestion client** — push activity events lên backend qua ingest API (= backfill, không cần webhook); **(2) local AST companion** — dựng `.devbrain/graph.db` (tree-sitter) cho `explore`/`affected`/MCP.
+- Local symbol graph = **"Phase 4 graph nhưng local-first + AST-sâu + hướng AI-agent"** — *bổ sung*, không thay graph central.
+
+### 7.2 Command surface
+
+| `devbrain <cmd>` | Làm gì | ↔ codegraph |
+|---|---|---|
+| `init` | Tạo `.devbrain/config.toml` (backend tunnel, repo id, token ref) + gitignore | `init` |
+| `index` | Walk git history → **push activity events** (backfill qua API); **dựng local `.devbrain/graph.db`** (tree-sitter symbols + `depends_on`/`calls`) | `init` build |
+| `sync` | Incremental: commit mới từ cursor → push events + update local graph (FS watcher, debounce) | `sync` |
+| `explore` / `search <q>` | **Hybrid**: local symbol graph (call paths, blast-radius) **+** remote semantic search (narratives/docs đa nguồn, có citation) | `explore`/`query` |
+| `affected <files>` | Blast-radius: symbol/test/doc/epic bị ảnh hưởng (= leverage **#6**) | `affected` |
+| `status` | Cursor, freshness, staleness banner | `status` |
+| `mcp` / `install` | Đăng ký devbrain làm **MCP server** cho Claude Code/Cursor (= leverage **#1**, ask-the-brain có dẫn chứng) | `install` + MCP |
+| `watch` | Daemon FS-watcher auto-sync | (auto-sync) |
+| `upgrade` | Cập nhật (pip) | `upgrade` |
+
+### 7.3 Packaging
+- **Python + PyPI + pipx** (`pipx install devbrain`, entry point `devbrain`) — tái dùng `backfill.py` + `tree-sitter` Python bindings, **giữ một ngôn ngữ** (golden rule "không introduce style thứ 2"). Codegraph chọn npm/TS vì nhắm JS-heavy + bundle Node; pipeline devbrain là Python nên Python hợp hơn. Chỉ npm-hoá nếu sau cần tối ưu install cho dev non-Python.
+- Config `.devbrain/config.toml` (gitignored); auth `DEVBRAIN_TOKEN` sau Cloudflare Access.
+
+### 7.4 Backend delta — ingest API (kênh ingest hạng nhất)
+- **`POST /ingest/events`** trên receiver: batch, **token/HMAC auth**, cùng insert idempotent `unique(source,source_event_id)` + enqueue sweep, **ACK <10s** (golden rule #9). Tổng quát hóa webhook GitHub/Lark thành kênh ingest chung; CLI push qua đây, không chạm DB.
+- (Optional) reuse search RPC làm endpoint cho `explore`/`mcp` (gộp leverage #1).
+
+### 7.5 Local store `.devbrain/graph.db`
+- SQLite (WAL) + tree-sitter: nodes (function/class/method/route), edges (`calls`/`imports`/`extends`/`implements`), FTS5 full-text.
+- Sync: FS watcher (FSEvents/inotify), debounce; reconcile `(size, mtime)` + content-hash khi mở (như codegraph).
+- Bắt đầu **hẹp**: chỉ ngôn ngữ team dùng (Python/TS) — **không** cố match 20+ lang & 17 framework của codegraph ngày một.
+
+### 7.6 Golden-rule & rủi ro
+- ✅ Symbol graph = facts tree-sitter → `derived_by='git'`, **không AI-score, không chấm người**.
+- ✅ `.devbrain/graph.db` = projection **disposable, rebuildable** (Rule #2).
+- ✅ Idempotency xuyên đường: commit event **luôn** dùng `sha` làm `source_event_id` → repo có cả webhook + CLI **không double-count** (cursor + UPSERT lo phần còn lại).
+- ⚠️ **Không push từng symbol làm event** vào central log (nổ volume, sai bản chất "facts"). Symbol graph ở **local**; central chỉ nhận activity events + (optional) edge `depends_on` mức **module** đã tổng hợp.
+- ⚠️ Không để local graph thành source-of-truth thứ hai.
+
+### 7.7 Sequencing (mở rộng sau core; hợp nhất Phase 4 + leverage #1/#6)
+1. **Ingest API** (push không-webhook) → 2. `init`/`index`/`sync` (local backfill client) → 3. **local tree-sitter symbol graph** + `explore`/`affected` → 4. **`devbrain mcp`** (gộp leverage #1) → **publish PyPI**.
