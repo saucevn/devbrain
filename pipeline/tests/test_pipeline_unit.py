@@ -77,3 +77,12 @@ def test_file_churn_push_has_no_line_counts():
     # Push payloads carry no per-file line counts → churn 0 (commit_count still
     # increments in apply_metrics).
     assert pipeline.file_churn(_push_payload(), "a.py") == (0, 0)
+
+
+# ---- §5 co-change cap: big commits (initial import / large refactor) skip ---
+def test_cochange_skip_threshold():
+    cap = pipeline.COCHANGE_MAX_FILES
+    assert pipeline.cochange_skip(["f"] * (cap + 1)) is True
+    assert pipeline.cochange_skip(["f"] * cap) is False
+    assert pipeline.cochange_skip(["a", "b"]) is False
+    assert pipeline.cochange_skip([]) is False

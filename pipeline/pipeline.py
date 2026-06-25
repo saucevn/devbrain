@@ -513,10 +513,20 @@ async def apply_metrics(conn, ev):
         )
 
 
+COCHANGE_MAX_FILES = 50  # commit/PR đụng > N file (initial import / refactor lớn)
+                         # → bỏ co-change tránh clique C(n,2) nhiễu; metrics vẫn đếm.
+
+
+def cochange_skip(paths: list[str]) -> bool:
+    return len(paths) > COCHANGE_MAX_FILES
+
+
 async def apply_cochange(conn, ev, version):
     """File đổi cùng nhau trong 1 commit/PR ⇒ cạnh co_changed_with, weight+=1.
     Hoàn toàn deterministic, KHÔNG cần LLM."""
     paths = [p for p in changed_files(ev["payload"]) if not is_ignored(p)]
+    if cochange_skip(paths):
+        return   # §5: commit quá lớn → skip co-change (entities vẫn do metrics lane tạo)
     ids = [await upsert_entity(conn, "file", p, p.split("/")[-1]) for p in paths]
     ts = ev["occurred_at"]
     for i in range(len(ids)):
