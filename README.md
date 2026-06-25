@@ -1,63 +1,86 @@
 # devbrain
 
-A real-time **"second brain" / living changelog** for a dev team. It ingests
-git / PR / docs activity and surfaces four views: a pyramid capability heatmap,
-a yearly roadmap, a knowledge graph, and semantic search.
+A real-time **"second brain" / living changelog** for a dev team — it ingests
+git / PR / docs activity and turns it into five views: **activity heat**,
+**semantic search**, **entity confirm**, a **capability pyramid**, and a
+**yearly roadmap**.
 
-It is **event-sourced**: `events` is the single immutable source of truth, and
-everything else (metrics, graph edges, narratives, embeddings) is a derived
-projection that can be rebuilt from events at any time. Two layers stay cleanly
-separated — a **deterministic** lane computed from git facts (cheap, reproducible,
-drives the heatmap/roadmap) and a **probabilistic** lane produced by an LLM
-(summaries + entity extraction + embeddings, always linked back to source events).
+**Event-sourced:** `events` is the single immutable source of truth; everything
+else (metrics, graph edges, narratives, embeddings, status history) is a
+derived, replayable projection. Two cleanly separated lanes:
 
-> Full design, phases, and decision log: **[PROJECT_PLAN.md](PROJECT_PLAN.md)**.
-> Engineering rules (non-negotiable): **[CLAUDE.md](CLAUDE.md)**.
+- **Deterministic** (git facts, **$0 LLM**, reproducible) → activity heat,
+  co-change graph, pyramid heat, roadmap.
+- **Probabilistic** (LLM) → PR/doc narratives, entity extraction, embeddings —
+  always linked back to source events for verification. **No AI scoring of
+  people or contributions, ever.**
+
+> Design, phases & decision log: **[PROJECT_PLAN.md](PROJECT_PLAN.md)** ·
+> engineering rules (non-negotiable): **[CLAUDE.md](CLAUDE.md)** ·
+> architecture diagrams: [`docs/`](docs/).
+
+## Status (2026-06-25)
+
+Phases 0–3 shipped · live ingest running · multi-project namespacing in place.
+
+| ✅ | Scope |
+|---|---|
+| Phase 0 | foundation: `compose up`, schema, webhook stores events |
+| Phase 1 | backfill + deterministic projectors + dashboard ($0 LLM) |
+| Phase 2A | AI narrative (Haiku) + Gemini embeddings + GitHub enrichment |
+| Phase 2B | semantic search (pgvector + citation) |
+| Phase 2C | entity-confirm UI (human-owned) |
+| Phase 3 | rich pyramid (layer/maturity/risk) + roadmap from GitHub milestones |
+| Multi-project | entities namespaced `{repo}:{path}` + per-project filter |
+| Live ingest | Cloudflare Tunnel → receiver · GitHub webhook (push/PR/release/milestone) |
+
+**Next:** Phase 4 knowledge graph · Phase 5 Sonnet rollup + ops · Lark/docs ingest.
 
 ## Stack
 
-- **Backend:** Python 3.12 · FastAPI (receiver) · ARQ + Redis (worker) · asyncpg (no ORM) · Pydantic v2 · Anthropic SDK
-- **DB:** Postgres 16 + pgvector (local, in compose). Hand-written SQL migrations, applied in order.
-- **Frontend:** Next.js 15 (opt-in via compose profile) — not built yet.
-- **Deploy:** Docker Compose (VPS or Mac) · Cloudflare Tunnel + Access · backup to R2.
+- **Backend:** Python 3.12 · FastAPI (receiver) · ARQ + Redis (worker) · asyncpg (no ORM) · Pydantic v2 · Anthropic (Haiku/Sonnet)
+- **Embeddings:** Google Gemini `gemini-embedding-001` @1536 (L2-normalized) → `vector(1536)`
+- **DB:** Postgres 16 + pgvector (in compose); ordered SQL migrations `000→004`
+- **Frontend:** Next.js 15 (App Router; Server Components query Postgres; ISR)
+- **Deploy:** Docker Compose · Cloudflare Tunnel + Access · backup → R2
 
 ## Run
 
 ```bash
-# 1. Configure env (fill in real secrets for cloudflared/backup/AI later)
-cp .env.example .env
-
-# 2. Bring up the backend (frontend stays off — that's for Cloudflare Pages)
-docker compose up -d --build
-#    Self-host the frontend too:
-#    docker compose --profile frontend up -d --build
-
-# Migrations 000 → 001 → 002 auto-apply on the FIRST db boot (empty volume only).
+cp .env.example .env          # secrets: GITHUB_*, ANTHROPIC_API_KEY, GEMINI_API_KEY, TUNNEL_TOKEN, R2_*
+docker compose up -d --build                          # backend (db, redis, receiver, worker, cloudflared, backup)
+docker compose --profile frontend up -d --build web   # + dashboard at :3000
+python pipeline/backfill.py <repo-url>                # seed deterministic data from git history
 ```
 
-The webhook receiver listens at `POST /webhooks/github` (HMAC-verified, ACKs in
-<10s) and `GET /health`. Heavy work happens in the worker, never the request path.
-
-## Backfill (Phase 1 — deterministic, $0 LLM)
-
-Seed `events` from a repo's git history and build the deterministic projections
-(`metrics_daily`, co-change `entity_edges`):
+Migrations `000→004` auto-apply on the **first (empty)** db boot; apply later ones
+manually. Run the tests in the built image:
 
 ```bash
-python pipeline/backfill.py <repo-path-or-clone-url>
+docker run --rm -v "$PWD/pipeline:/app" -w /app -e PYTHONPATH=/app \
+  -e DATABASE_URL=postgresql://t:t@localhost/t dev-second-brain-receiver \
+  sh -c "pip install -q pytest && python -m pytest -q tests/"
 ```
 
-Backfill is idempotent (events keyed by commit SHA; projectors advance a cursor),
-so re-running it never double-counts. It only drives the deterministic lane — no
-LLM, no embeddings.
+## Views — http://localhost:3000
 
-## Replay a projector
+- `/` — activity heat (commits/file) + co-change + project switcher
+- `/search` — semantic search (Gemini query embed → pgvector cosine, with citations)
+- `/entities` — confirm / rename AI-proposed entities (human-owned, survives replay)
+- `/pyramid` — capability pyramid (layer / maturity / risk; heat ↔ maturity toggle)
+- `/roadmap` — yearly roadmap from GitHub milestones
 
-After changing a projector's logic: `truncate` its projection table, bump
-`logic_version`, reset `last_seq = 0`, and the worker rebuilds from `seq = 0`.
-See the recipe at the bottom of `supabase/migrations/001_schema.sql`.
+## Ingest & multi-project
 
-## Status
+One endpoint `POST /webhooks/github` (HMAC-verified, ACKs <10s → ARQ/Redis queue
+→ per-projector cursor sweep). **Any number of repos** can point at it; commits
+use a transport-independent identity (`source='git'` / sha) so webhook ↔ backfill
+never double-count, and entities are namespaced `{repo}:{path}` so projects don't
+collide. Lark + docs-upload ingest are designed (see PROJECT_PLAN.md) but not yet built.
 
-Phase 0 → 1. Deterministic backbone first; the AI lane, frontend, and knowledge
-graph come later (see PROJECT_PLAN.md §6).
+## Replay
+
+Change a projector's logic → clear its projection table, bump `logic_version`,
+reset `last_seq = 0`; the worker rebuilds from `seq = 0`. Curated data
+(`pyramid_blocks`, confirmed entities, status notes) is **not** a projection —
+it's protected by the R2 backup and never cleared.
