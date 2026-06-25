@@ -159,3 +159,57 @@ export async function searchBrain(q: string, limit = 12): Promise<SearchHit[]> {
     }));
   }, []);
 }
+
+
+// ---- Phase 2C: entity confirm ---------------------------------------------
+export type ProposedEntity = {
+  id: string;
+  kind: string;
+  canonicalKey: string;
+  displayName: string;
+  touches: number;
+  lastSeen: string | null;
+};
+
+export function getProposedEntities(limit = 50): Promise<ProposedEntity[]> {
+  return safe(async () => {
+    const { rows } = await pool.query(
+      `select e.id, e.entity_kind, e.canonical_key, e.display_name, e.last_seen_at,
+              count(c.id)::int as touches
+       from entities e
+       left join contributions c on c.entity_id = e.id
+       where e.resolution_status = 'proposed'
+       group by e.id
+       order by e.last_seen_at desc
+       limit $1`,
+      [limit]
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      kind: r.entity_kind,
+      canonicalKey: r.canonical_key,
+      displayName: r.display_name,
+      touches: r.touches,
+      lastSeen: r.last_seen_at ? new Date(r.last_seen_at).toISOString().slice(0, 10) : null,
+    }));
+  }, []);
+}
+
+// Human-owned write: confirm/reject + optional rename. canonical_key is the
+// AI's anchor and is NOT editable here (golden rule #5).
+export async function confirmEntityDb(
+  id: string,
+  action: "confirm" | "reject",
+  displayName?: string
+): Promise<void> {
+  const status = action === "reject" ? "rejected" : "confirmed";
+  const name = displayName?.trim();
+  if (name) {
+    await pool.query(
+      "update entities set resolution_status = $2, display_name = $3 where id = $1",
+      [id, status, name]
+    );
+  } else {
+    await pool.query("update entities set resolution_status = $2 where id = $1", [id, status]);
+  }
+}

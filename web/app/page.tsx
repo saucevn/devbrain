@@ -44,7 +44,7 @@ export default async function Home() {
             <span className="h-2.5 w-2.5 rounded-full bg-accent shadow-[0_0_12px_2px_var(--color-accent)]" />
             <h1 className="font-mono text-2xl font-bold tracking-tight">devbrain</h1>
           </div>
-          <div className="flex items-center gap-4"><a href="/search" className="font-mono text-xs text-accent hover:underline">⌕ search</a><span className="font-mono text-xs text-muted">deterministic backbone · $0 LLM</span></div>
+          <div className="flex items-center gap-4"><a href="/search" className="font-mono text-xs text-accent hover:underline">⌕ search</a><a href="/entities" className="font-mono text-xs text-accent hover:underline">entities</a><span className="font-mono text-xs text-muted">deterministic backbone · $0 LLM</span></div>
         </div>
         <p className="max-w-2xl text-sm leading-6 text-muted">
           A living changelog for the team — <span className="text-fg">events</span> are the immutable
