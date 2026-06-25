@@ -7,12 +7,21 @@ const pool =
   new Pool({ connectionString: process.env.DATABASE_URL, max: 5 });
 if (process.env.NODE_ENV !== "production") g._pgPool = pool;
 
-export type Summary = {
-  events: number;
-  entities: number;
-  edges: number;
-  lastEvent: string | null;
-};
+// SQL fragment: strip the '{project}:' namespace prefix for display.
+const STRIP =
+  "case when e.project is not null and e.canonical_key like e.project || ':%' " +
+  "then substr(e.canonical_key, length(e.project) + 2) else e.canonical_key end";
+
+async function safe<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    console.error("[data] query failed:", e);
+    return fallback;
+  }
+}
+
+export type Summary = { events: number; entities: number; edges: number; lastEvent: string | null };
 export type HotFile = {
   key: string;
   name: string;
@@ -23,13 +32,14 @@ export type HotFile = {
 };
 export type CoChange = { a: string; b: string; weight: number };
 
-async function safe<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
-  try {
-    return await fn();
-  } catch (e) {
-    console.error("[data] query failed:", e);
-    return fallback;
-  }
+// Distinct projects (repos) for the dashboard project switcher.
+export function getProjects(): Promise<string[]> {
+  return safe(async () => {
+    const { rows } = await pool.query(
+      "select distinct project from entities where project is not null order by project"
+    );
+    return rows.map((r) => r.project as string);
+  }, []);
 }
 
 export function getSummary(): Promise<Summary> {
@@ -54,10 +64,10 @@ export function getSummary(): Promise<Summary> {
   );
 }
 
-export function getHotFiles(limit = 28): Promise<HotFile[]> {
+export function getHotFiles(limit = 28, project?: string): Promise<HotFile[]> {
   return safe(async () => {
     const { rows } = await pool.query(
-      `select e.canonical_key                       as key,
+      `select ${STRIP}                              as key,
               e.display_name                        as name,
               sum(m.commit_count)::int              as commits,
               sum(m.lines_added + m.lines_removed)::int as churn,
@@ -65,11 +75,11 @@ export function getHotFiles(limit = 28): Promise<HotFile[]> {
               bool_or(m.day >= current_date - 30)   as active30d
        from entities e
        join metrics_daily m on m.entity_id = e.id
-       where e.entity_kind = 'file'
+       where e.entity_kind = 'file' and ($2::text is null or e.project = $2)
        group by e.id
        order by commits desc, churn desc
        limit $1`,
-      [limit]
+      [limit, project ?? null]
     );
     return rows.map((r) => ({
       key: r.key,
@@ -82,22 +92,21 @@ export function getHotFiles(limit = 28): Promise<HotFile[]> {
   }, []);
 }
 
-export function getCoChanges(limit = 16): Promise<CoChange[]> {
+export function getCoChanges(limit = 16, project?: string): Promise<CoChange[]> {
   return safe(async () => {
     const { rows } = await pool.query(
       `select ef.display_name as a, et.display_name as b, ed.weight::int as weight
        from entity_edges ed
        join entities ef on ef.id = ed.from_entity
        join entities et on et.id = ed.to_entity
-       where ed.edge_type = 'co_changed_with'
+       where ed.edge_type = 'co_changed_with' and ($2::text is null or ef.project = $2)
        order by ed.weight desc, a, b
        limit $1`,
-      [limit]
+      [limit, project ?? null]
     );
     return rows.map((r) => ({ a: r.a, b: r.b, weight: r.weight }));
   }, []);
 }
-
 
 // ---- Phase 2B: semantic search -------------------------------------------
 async function embedQuery(text: string): Promise<number[]> {
@@ -160,7 +169,6 @@ export async function searchBrain(q: string, limit = 12): Promise<SearchHit[]> {
   }, []);
 }
 
-
 // ---- Phase 2C: entity confirm ---------------------------------------------
 export type ProposedEntity = {
   id: string;
@@ -171,18 +179,18 @@ export type ProposedEntity = {
   lastSeen: string | null;
 };
 
-export function getProposedEntities(limit = 50): Promise<ProposedEntity[]> {
+export function getProposedEntities(limit = 50, project?: string): Promise<ProposedEntity[]> {
   return safe(async () => {
     const { rows } = await pool.query(
-      `select e.id, e.entity_kind, e.canonical_key, e.display_name, e.last_seen_at,
+      `select e.id, e.entity_kind, ${STRIP} as canonical_key, e.display_name, e.last_seen_at,
               count(c.id)::int as touches
        from entities e
        left join contributions c on c.entity_id = e.id
-       where e.resolution_status = 'proposed'
+       where e.resolution_status = 'proposed' and ($2::text is null or e.project = $2)
        group by e.id
        order by e.last_seen_at desc
        limit $1`,
-      [limit]
+      [limit, project ?? null]
     );
     return rows.map((r) => ({
       id: r.id,
@@ -213,7 +221,6 @@ export async function confirmEntityDb(
     await pool.query("update entities set resolution_status = $2 where id = $1", [id, status]);
   }
 }
-
 
 // ---- Phase 3: pyramid (curated blocks + deterministic heat) ---------------
 export type PyramidBlock = {
@@ -249,7 +256,6 @@ export function getPyramid(): Promise<PyramidBlock[]> {
     }));
   }, []);
 }
-
 
 // ---- Phase 3: roadmap (status_history → by year) --------------------------
 export type RoadmapItem = {

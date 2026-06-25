@@ -2,6 +2,7 @@ import {
   getSummary,
   getHotFiles,
   getCoChanges,
+  getProjects,
   type HotFile,
   type CoChange,
 } from "@/lib/data";
@@ -26,11 +27,17 @@ function heatLevel(commits: number, max: number): number {
   return 1;
 }
 
-export default async function Home() {
-  const [summary, hot, co] = await Promise.all([
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ project?: string }>;
+}) {
+  const { project } = await searchParams;
+  const [summary, projects, hot, co] = await Promise.all([
     getSummary(),
-    getHotFiles(28),
-    getCoChanges(16),
+    getProjects(),
+    getHotFiles(28, project),
+    getCoChanges(16, project),
   ]);
   const maxCommits = hot.reduce((m, f) => Math.max(m, f.commits), 0);
   const maxWeight = co.reduce((m, c) => Math.max(m, c.weight), 0);
@@ -51,6 +58,21 @@ export default async function Home() {
           source of truth; the heat and co-change below are deterministic projections rebuilt from git
           history. No AI scoring, ever.
         </p>
+        {projects.length > 1 && (
+          <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
+            <span className="text-muted">project:</span>
+            <a href="/" className={!project ? "text-accent" : "text-muted hover:text-fg"}>all</a>
+            {projects.map((p) => (
+              <a
+                key={p}
+                href={`/?project=${encodeURIComponent(p)}`}
+                className={project === p ? "text-accent" : "text-muted hover:text-fg"}
+              >
+                {p}
+              </a>
+            ))}
+          </div>
+        )}
         <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <Stat label="events" value={summary.events} />
           <Stat label="entities" value={summary.entities} />
