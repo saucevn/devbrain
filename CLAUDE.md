@@ -49,7 +49,7 @@ Webhook receiver and worker are two processes from one image. The sweep reads `e
 ## Repo layout
 
 ```
-supabase/migrations/   000_local_roles · 001_schema · 002_idempotency  (auto-applied on first db boot)
+supabase/migrations/   000_local_roles · 001_schema · 002_idempotency · 003_pyramid_blocks · 004_entities_project  (auto-applied on first db boot)
 pipeline/              pipeline.py (receiver + sweep + filters + summarize) · backfill.py · rollup.py · Dockerfile · requirements.txt
 backup/                Dockerfile · backup.sh   (pg_dump → R2 sidecar)
 web/                   Next.js 15 + Shadcn (frontend; opt-in via compose profile)
@@ -111,16 +111,16 @@ aws s3 cp s3://$R2_BUCKET/backups/<file>.sql.gz - --endpoint-url $R2_ENDPOINT | 
 
 ## Current state & build order
 
-Status (2026-06-25): deterministic backbone + live ingest + AI lane bootstrapped.
+Status (2026-06-25): **Phases 0–3 shipped · live ingest · multi-project namespace.**
 
 1. ✅ **Phase 0** — foundation: `docker compose up` green, schema applied, webhook stores events.
 2. ✅ **Phase 1** — `backfill.py` + metrics + co-change projectors + Next.js dashboard (**$0 LLM**).
-3. 🚧 **Phase 2** — ✅ **2A**: AI summarize (Haiku, forced `tool_use`) + entity extraction + **Gemini embeddings** + GitHub **enrichment** (verified E2E on PR #1). ← *next: 2B pgvector semantic search, 2C entity-confirm UI*.
-4. **Phase 3** — pyramid (human structure + metric heat) + roadmap from `status_history`.
-5. **Phase 4** — knowledge graph (subgraph-by-query; **build last**, after entity resolution is solid).
+3. ✅ **Phase 2** — 2A narrative (Haiku, forced `tool_use`) + Gemini embeddings + GitHub enrichment · 2B pgvector semantic search · 2C entity-confirm UI.
+4. ✅ **Phase 3** — rich pyramid (`pyramid_blocks`: layer/maturity/risk + heat overlay) + roadmap from GitHub milestones (`entity_status_history`).
+5. **Phase 4** — knowledge graph (subgraph-by-query; **build last**). ← *next*
 6. **Phase 5** — Sonnet rollup diary + cost/monitoring + replay runbook.
 
-Also live: Cloudflare Tunnel (`dev.hira.vn`) → receiver; GitHub webhook on `saucevn/devbrain` (push/pull_request/release).
+Also done: **multi-project namespace** (entities `{repo}:{path}` + `entities.project`, migration 004) · §5 co-change cap · §7.6 transport-independent commit identity (`source='git'`/sha). Live: Cloudflare Tunnel (`dev.hira.vn`) → receiver; GitHub webhook (push/pull_request/release/milestone). Migrations now **000→004**.
 
 **Embedding provider — RESOLVED (Gemini):** `gemini-embedding-001` @ `output_dimensionality=1536`, L2-normalized; `RETRIEVAL_DOCUMENT` to index, `RETRIEVAL_QUERY` to search. Matches the existing `vector(1536)` → **no migration**. `embed()` already uses it (Phase 2A). STOP-AND-ASK still applies before any *schema* change.
 
