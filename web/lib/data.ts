@@ -213,3 +213,39 @@ export async function confirmEntityDb(
     await pool.query("update entities set resolution_status = $2 where id = $1", [id, status]);
   }
 }
+
+
+// ---- Phase 3: pyramid (curated blocks + deterministic heat) ---------------
+export type PyramidBlock = {
+  key: string;
+  name: string;
+  layer: number;
+  position: number;
+  maturity: number | null;
+  riskClass: string | null;
+  description: string | null;
+  entityCount: number;
+  commits: number;
+  churn: number;
+};
+
+export function getPyramid(): Promise<PyramidBlock[]> {
+  return safe(async () => {
+    const { rows } = await pool.query(
+      `select b.key, b.name, b.layer, b.position, b.maturity, b.risk_class, b.description,
+              count(distinct e.id)::int as entity_count,
+              coalesce(sum(m.commit_count), 0)::int as commits,
+              coalesce(sum(m.lines_added + m.lines_removed), 0)::int as churn
+       from pyramid_blocks b
+       left join entities e on e.pyramid_block = b.key and e.merged_into is null
+       left join metrics_daily m on m.entity_id = e.id
+       group by b.id
+       order by b.layer desc, b.position`
+    );
+    return rows.map((r) => ({
+      key: r.key, name: r.name, layer: r.layer, position: r.position,
+      maturity: r.maturity, riskClass: r.risk_class, description: r.description,
+      entityCount: r.entity_count, commits: r.commits, churn: r.churn,
+    }));
+  }, []);
+}
