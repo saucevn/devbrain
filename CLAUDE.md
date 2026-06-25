@@ -63,7 +63,7 @@ PROJECT_PLAN.md        full plan: phases, decision log, risks
 
 - **Backend:** Python 3.12, FastAPI (receiver), ARQ + Redis (worker), asyncpg (no ORM), Pydantic v2, Anthropic SDK.
 - **DB:** Postgres 16 + pgvector, local in compose. Schema is hand-written SQL — no migration framework, just ordered files.
-- **AI:** `MODEL_SUMMARY = claude-haiku-4-5-20251001`, `MODEL_ROLLUP = claude-sonnet-4-6`. Structured output via forced `tool_use`. Embeddings provider TBD (locks `EMBED_DIM` ↔ `vector(N)`).
+- **AI:** `MODEL_SUMMARY = claude-haiku-4-5-20251001`, `MODEL_ROLLUP = claude-sonnet-4-6`. Structured output via forced `tool_use`. Embeddings: **Gemini `gemini-embedding-001` @1536** (L2-normalized) → matches `vector(1536)` (`EMBED_DIM=1536`).
 - **Frontend:** Next.js 15 (App Router, Server Components query Postgres directly), Shadcn + Tailwind, ISR (no realtime).
 - **Deploy:** Docker Compose, host-agnostic (VPS or Mac), Cloudflare Tunnel + Access, backup to R2.
 
@@ -111,18 +111,18 @@ aws s3 cp s3://$R2_BUCKET/backups/<file>.sql.gz - --endpoint-url $R2_ENDPOINT | 
 
 ## Current state & build order
 
-Design is complete; code is at **Phase 0 → 1**. Build the deterministic backbone *before* anything AI or visual.
+Status (2026-06-25): deterministic backbone + live ingest + AI lane bootstrapped.
 
-1. **Phase 0** — foundation: `docker compose up` green, schema applied, webhook stores events.
-2. **Phase 1** — `backfill.py` + metrics + co-change projectors → useful dashboard with **$0 LLM**. ← *next*
-3. **Phase 2** — AI summarize (Haiku) + entity extraction + pgvector search.
+1. ✅ **Phase 0** — foundation: `docker compose up` green, schema applied, webhook stores events.
+2. ✅ **Phase 1** — `backfill.py` + metrics + co-change projectors + Next.js dashboard (**$0 LLM**).
+3. 🚧 **Phase 2** — ✅ **2A**: AI summarize (Haiku, forced `tool_use`) + entity extraction + **Gemini embeddings** + GitHub **enrichment** (verified E2E on PR #1). ← *next: 2B pgvector semantic search, 2C entity-confirm UI*.
 4. **Phase 3** — pyramid (human structure + metric heat) + roadmap from `status_history`.
 5. **Phase 4** — knowledge graph (subgraph-by-query; **build last**, after entity resolution is solid).
 6. **Phase 5** — Sonnet rollup diary + cost/monitoring + replay runbook.
 
-**Do NOT** start the AI lane, frontend, or graph viz before the deterministic backbone works.
+Also live: Cloudflare Tunnel (`dev.hira.vn`) → receiver; GitHub webhook on `saucevn/devbrain` (push/pull_request/release).
 
-**One open blocker before Phase 2:** choose the embedding provider — it locks `EMBED_DIM` and the `vector(N)` column. Stop and ask before picking one.
+**Embedding provider — RESOLVED (Gemini):** `gemini-embedding-001` @ `output_dimensionality=1536`, L2-normalized; `RETRIEVAL_DOCUMENT` to index, `RETRIEVAL_QUERY` to search. Matches the existing `vector(1536)` → **no migration**. `embed()` already uses it (Phase 2A). STOP-AND-ASK still applies before any *schema* change.
 
 ---
 
