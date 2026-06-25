@@ -457,19 +457,30 @@ def _normalize(vec: list[float]) -> list[float]:
 # =====================================================================
 # CANONICAL ENTITY UPSERT  (giữ human edit BẤT KHẢ XÂM PHẠM)
 # =====================================================================
-async def upsert_entity(conn, kind: str, canonical_key: str, display_name: str) -> str:
+def event_project(payload: dict) -> str | None:
+    """Project/workspace = repo full_name từ payload (vd 'saucevn/devbrain')."""
+    return ((payload.get("repository") or {}).get("full_name")) or None
+
+
+def project_key(project: str | None, key: str) -> str:
+    """Namespace canonical_key theo project → 2 repo cùng path KHÔNG bị gộp."""
+    return f"{project}:{key}" if project else key
+
+
+async def upsert_entity(conn, kind: str, canonical_key: str, display_name: str,
+                        project: str | None = None) -> str:
     """on conflict CHỈ bump last_seen_at. KHÔNG ghi đè display_name /
-    pyramid_layer / resolution_status (những field người đã sửa)."""
+    pyramid_layer / resolution_status / project (field người/định danh)."""
     return await conn.fetchval(
         """
-        insert into entities (entity_kind, canonical_key, display_name, resolution_status,
+        insert into entities (entity_kind, canonical_key, display_name, project, resolution_status,
                               first_seen_at, last_seen_at)
-        values ($1, $2, $3, 'proposed', now(), now())
+        values ($1, $2, $3, $4, 'proposed', now(), now())
         on conflict (entity_kind, canonical_key) do update
           set last_seen_at = now()
         returning id
         """,
-        kind, canonical_key, display_name,
+        kind, canonical_key, display_name, project,
     )
 
 
@@ -549,12 +560,13 @@ async def process_event(pool, name: str, ev, version: int):
 # ---- deterministic projectors (rẻ, không AI) -------------------------
 async def apply_metrics(conn, ev):
     day = ev["occurred_at"].date() if hasattr(ev["occurred_at"], "date") else None
+    proj = event_project(ev["payload"])
     paths = changed_files(ev["payload"])
     # map path → entity 'file', cộng dồn metric ngày (UPSERT +=, atomic).
     for path in paths:
         if is_ignored(path):
             continue
-        eid = await upsert_entity(conn, "file", path, path.split("/")[-1])
+        eid = await upsert_entity(conn, "file", project_key(proj, path), path.split("/")[-1], proj)
         adds, dels = file_churn(ev["payload"], path)
         await conn.execute(
             """
@@ -583,7 +595,8 @@ async def apply_cochange(conn, ev, version):
     paths = [p for p in changed_files(ev["payload"]) if not is_ignored(p)]
     if cochange_skip(paths):
         return   # §5: commit quá lớn → skip co-change (entities vẫn do metrics lane tạo)
-    ids = [await upsert_entity(conn, "file", p, p.split("/")[-1]) for p in paths]
+    proj = event_project(ev["payload"])
+    ids = [await upsert_entity(conn, "file", project_key(proj, p), p.split("/")[-1], proj) for p in paths]
     ts = ev["occurred_at"]
     for i in range(len(ids)):
         for j in range(i + 1, len(ids)):
@@ -614,7 +627,7 @@ async def apply_status(conn, ev, version):
     if number is None or not repo:
         return
     status = milestone_status(p.get("action") or "", ms.get("state") or "")
-    eid = await upsert_entity(conn, "epic", f"milestone:{repo}#{number}", ms.get("title") or f"#{number}")
+    eid = await upsert_entity(conn, "epic", f"milestone:{repo}#{number}", ms.get("title") or f"#{number}", repo)
     await conn.execute(
         """
         insert into entity_status_history (entity_id, status, changed_at, source_event_id)
@@ -648,13 +661,14 @@ async def apply_narrative(conn, ev, version: int, analysis: PRAnalysis, input_ha
     pr = parse_pr(enriched_payload)            # enriched ở maybe_summarize (event gốc bất biến)
     known_paths = changed_files(enriched_payload)
     known_issues = pr.get("issues", [])
+    proj = event_project(enriched_payload)
 
     # 1) UPSERT entities (giữ human edit) + contributions (chống trùng) ---
     key_to_id: dict[str, str] = {}
     for ent in analysis.entities:
         if not guard_canonical_key(ent, known_paths, known_issues):   # chốt hallucination
             continue
-        eid = await upsert_entity(conn, ent.kind, ent.canonical_key, ent.display_name)
+        eid = await upsert_entity(conn, ent.kind, project_key(proj, ent.canonical_key), ent.display_name, proj)
         key_to_id[ent.canonical_key] = eid
         await conn.execute(
             """

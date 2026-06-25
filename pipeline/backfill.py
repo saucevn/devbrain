@@ -111,9 +111,12 @@ async def insert_events(pool, commits: list[dict], url_base: str | None) -> int:
     """UPSERT one event per commit. Returns count of NEWLY inserted rows
     (conflicts on (source, source_event_id) are silently skipped → idempotent)."""
     inserted = 0
+    project = url_base.rsplit("github.com/", 1)[-1] if url_base else None
     async with pool.acquire() as conn:
         for c in commits:
             payload = {"sha": c["sha"], "author": c["author"], "files": c["files"]}
+            if project:
+                payload["repository"] = {"full_name": project}
             occurred = datetime.fromisoformat(c["date"])
             url = f"{url_base}/commit/{c['sha']}" if url_base else None
             seq = await conn.fetchval(

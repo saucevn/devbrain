@@ -138,3 +138,15 @@ def test_milestone_status_mapping():
     assert pipeline.milestone_status("edited", "open") == "in_progress"
     assert pipeline.milestone_status("closed", "closed") == "shipped"
     assert pipeline.milestone_status("edited", "closed") == "shipped"
+
+
+# ---- multi-project namespace: project extraction + key namespacing ---------
+def test_event_project_from_repository():
+    assert pipeline.event_project({"repository": {"full_name": "saucevn/devbrain"}}) == "saucevn/devbrain"
+    assert pipeline.event_project({}) is None
+    assert pipeline.event_project({"repository": {}}) is None
+
+
+def test_project_key_namespacing():
+    assert pipeline.project_key("saucevn/devbrain", "src/index.ts") == "saucevn/devbrain:src/index.ts"
+    assert pipeline.project_key(None, "src/index.ts") == "src/index.ts"
