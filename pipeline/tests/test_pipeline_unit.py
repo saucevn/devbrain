@@ -86,3 +86,46 @@ def test_cochange_skip_threshold():
     assert pipeline.cochange_skip(["f"] * cap) is False
     assert pipeline.cochange_skip(["a", "b"]) is False
     assert pipeline.cochange_skip([]) is False
+
+
+# ---- §7.6 transport-independent commit identity: push fan-out per commit ----
+def test_fan_out_push_one_event_per_commit_keyed_by_sha():
+    import datetime as dt
+    p = {
+        "repository": {"full_name": "o/r"},
+        "commits": [
+            {"id": "sha1", "url": "u1", "timestamp": "2026-06-24T12:00:00Z",
+             "author": {"email": "a@x.com", "username": "a"},
+             "added": ["x.py"], "modified": ["y.py"], "removed": []},
+            {"id": "sha2", "url": "u2", "timestamp": "2026-06-24T12:05:00Z",
+             "author": {"email": "b@x.com"}, "added": [], "modified": ["y.py"], "removed": ["z.py"]},
+        ],
+    }
+    evs = pipeline.fan_out_github("push", p, "delivery-123")
+    assert len(evs) == 2
+    assert all(e["source"] == "git" for e in evs)
+    assert [e["source_event_id"] for e in evs] == ["sha1", "sha2"]
+    assert all(e["event_type"] == "commit.pushed" for e in evs)
+    assert isinstance(evs[0]["occurred_at"], dt.datetime)
+    assert evs[0]["actor"] == "a@x.com"
+    assert pipeline.changed_files(evs[0]["payload"]) == ["x.py", "y.py"]
+    assert pipeline.changed_files(evs[1]["payload"]) == ["y.py", "z.py"]
+
+
+def test_fan_out_non_push_single_event_keyed_by_delivery():
+    p = {"action": "closed", "pull_request": {"merged": True, "merged_at": "2026-01-02T03:04:05Z",
+         "user": {"login": "bob"}, "html_url": "h", "number": 7}}
+    evs = pipeline.fan_out_github("pull_request", p, "delivery-xyz")
+    assert len(evs) == 1
+    assert evs[0]["source"] == "github"
+    assert evs[0]["source_event_id"] == "delivery-xyz"
+    assert evs[0]["event_type"] == "pr.merged"
+
+
+def test_fan_out_push_skips_commit_without_sha():
+    p = {"commits": [
+        {"id": "sha1", "timestamp": "2026-06-24T12:00:00Z", "added": ["a"], "modified": [], "removed": []},
+        {"added": ["b"]},  # no id → skipped
+    ]}
+    evs = pipeline.fan_out_github("push", p, "d")
+    assert [e["source_event_id"] for e in evs] == ["sha1"]

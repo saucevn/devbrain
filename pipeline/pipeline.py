@@ -146,30 +146,35 @@ async def github_webhook(
         raise HTTPException(status_code=401, detail="bad signature")
 
     payload = await request.json()
-    event_type, occurred_at, actor, url = normalize_github(x_github_event, payload)
 
-    # --- G2: idempotent insert (webhook retry dùng cùng delivery ID) ----
-    #   on conflict do nothing → nếu KHÔNG trả về id ⇒ đây là retry trùng
-    #   ⇒ KHÔNG enqueue lại (tránh xử lý 2 lần).
-    row = await app.state.pool.fetchrow(
-        """
-        insert into events (source, source_event_id, event_type, actor, source_url, payload, occurred_at)
-        values ('github', $1, $2, $3, $4, $5, $6)
-        on conflict (source, source_event_id) do nothing
-        returning seq
-        """,
-        x_github_delivery, event_type, actor, url, payload, occurred_at,
-    )
+    # --- G2: idempotent insert. §7.6: push fan-out 1 event/commit
+    #   (source='git'/sha) → dedup xuyên webhook↔backfill; event khác giữ
+    #   source='github'/delivery. on conflict do nothing → retry/trùng bỏ qua.
+    new_events = fan_out_github(x_github_event, payload, x_github_delivery)
+    stored = 0
+    async with app.state.pool.acquire() as conn:
+        for e in new_events:
+            row = await conn.fetchval(
+                """
+                insert into events (source, source_event_id, event_type, actor, source_url, payload, occurred_at)
+                values ($1, $2, $3, $4, $5, $6, $7)
+                on conflict (source, source_event_id) do nothing
+                returning seq
+                """,
+                e["source"], e["source_event_id"], e["event_type"], e["actor"],
+                e["source_url"], e["payload"], e["occurred_at"],
+            )
+            if row is not None:
+                stored += 1
 
-    # --- enqueue sweep có DEBOUNCE: cùng _job_id 'sweep' trong cửa sổ →
-    #     ARQ coalesce thành 1 job (nhiều push = 1 sweep). ----------------
-    if row is not None:
+    # --- enqueue sweep có DEBOUNCE (nhiều commit/push → 1 sweep) ----------
+    if stored:
         await app.state.arq.enqueue_job(
             "run_projectors", _job_id="sweep", _defer_by=DEBOUNCE_SEC
         )
 
-    # --- ACK ngay (< 10s timeout của GitHub); mọi việc nặng ở worker ----
-    return {"ok": True, "stored": row is not None}
+    # --- ACK ngay (< 10s timeout của GitHub); việc nặng ở worker ---------
+    return {"ok": True, "stored": stored}
 
 
 def normalize_github(event: str, p: dict) -> tuple[str, datetime, str | None, str | None]:
@@ -200,6 +205,41 @@ def _parse_ts(s: str | None) -> datetime:
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
         return datetime.now(timezone.utc)
+
+
+def fan_out_github(event: str, p: dict, delivery_id: str) -> list[dict]:
+    """§7.6 transport-independent commit identity: a `push` fans out to ONE
+    event PER COMMIT, keyed source='git' / source_event_id=sha → dedup xuyên
+    webhook/backfill/CLI qua unique(source, source_event_id). Event khác
+    (pr/release) giữ 1 event/delivery, source='github'."""
+    if event == "push":
+        repo = p.get("repository")
+        out: list[dict] = []
+        for c in p.get("commits") or []:
+            sha = c.get("id")
+            if not sha:
+                continue
+            author = c.get("author") or {}
+            out.append({
+                "source": "git",
+                "source_event_id": sha,
+                "event_type": "commit.pushed",
+                "actor": author.get("email") or author.get("username"),
+                "source_url": c.get("url"),
+                "payload": {"commits": [c], "repository": repo, "sha": sha},
+                "occurred_at": _parse_ts(c.get("timestamp")),
+            })
+        return out
+    event_type, occurred_at, actor, url = normalize_github(event, p)
+    return [{
+        "source": "github",
+        "source_event_id": delivery_id,
+        "event_type": event_type,
+        "actor": actor,
+        "source_url": url,
+        "payload": p,
+        "occurred_at": occurred_at,
+    }]
 
 
 # =====================================================================

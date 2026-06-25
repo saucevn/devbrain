@@ -120,7 +120,7 @@ async def insert_events(pool, commits: list[dict], url_base: str | None) -> int:
                 """
                 insert into events
                   (source, source_event_id, event_type, actor, source_url, payload, occurred_at)
-                values ('backfill', $1, 'commit.pushed', $2, $3, $4, $5)
+                values ('git', $1, 'commit.pushed', $2, $3, $4, $5)
                 on conflict (source, source_event_id) do nothing
                 returning seq
                 """,
