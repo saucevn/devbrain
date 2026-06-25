@@ -335,18 +335,36 @@ async def summarize_pr(pr: dict) -> PRAnalysis:
     return PRAnalysis.model_validate(block.input)
 
 
-async def embed(text: str) -> list[float]:
-    """Embedding provider-agnostic. PHẢI trả vector đúng EMBED_DIM.
-    Với VN+EN trộn nên dùng model multilingual mạnh (Voyage/Cohere/OpenAI)."""
+async def embed(text: str, task_type: str = "RETRIEVAL_DOCUMENT") -> list[float]:
+    """Gemini embeddings (gemini-embedding-001) ở EMBED_DIM dims → khớp
+    vector(EMBED_DIM) trong schema (VN+EN multilingual). task_type:
+    RETRIEVAL_DOCUMENT khi lưu, RETRIEVAL_QUERY khi search. Dims <3072 nên
+    normalize về unit length cho cosine (<=>)."""
     import httpx
     async with httpx.AsyncClient(timeout=30) as c:
         r = await c.post(
-            "https://api.voyageai.com/v1/embeddings",
-            headers={"Authorization": f"Bearer {os.environ['VOYAGE_API_KEY']}"},
-            json={"input": [text], "model": "voyage-3", "input_type": "document"},
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent",
+            params={"key": os.environ["GEMINI_API_KEY"]},
+            json={
+                "model": "models/gemini-embedding-001",
+                "content": {"parts": [{"text": text}]},
+                "taskType": task_type,
+                "outputDimensionality": EMBED_DIM,
+            },
         )
         r.raise_for_status()
-        return r.json()["data"][0]["embedding"]
+        return _normalize(_parse_gemini_embedding(r.json()))
+
+
+def _parse_gemini_embedding(data: dict) -> list[float]:
+    """embedContent response shape: {"embedding": {"values": [...]}}."""
+    return data["embedding"]["values"]
+
+
+def _normalize(vec: list[float]) -> list[float]:
+    import math
+    n = math.sqrt(sum(x * x for x in vec))
+    return [x / n for x in vec] if n > 0 else vec
 
 
 # =====================================================================
@@ -489,7 +507,8 @@ async def maybe_summarize(pool, ev, version: int):
     G4/C5: nếu input_hash đã tồn tại ⇒ SKIP luôn LLM (cache hit)."""
     if not passes_ai_gate(ev):                      # C1 funnel
         return None
-    pr = parse_pr(ev["payload"])
+    enriched = await enrich_pr_payload(ev["payload"])   # diff/files/issues qua GitHub API (ngoài tx)
+    pr = parse_pr(enriched)
     ih = sha256(str(PROMPT_VERSION), pr["title"], pr.get("body", ""), pr["diff"][:DIFF_CHAR_CAP])
 
     exists = await pool.fetchval("select 1 from narratives where input_hash=$1 limit 1", ih)
@@ -498,12 +517,13 @@ async def maybe_summarize(pool, ev, version: int):
 
     analysis = await summarize_pr(pr)                # ← LLM call duy nhất (Haiku)
     vec = await embed(analysis.summary_md)           # embed bản summary (rẻ hơn embed cả diff)
-    return analysis, ih, vec
+    return analysis, ih, vec, enriched
 
 
-async def apply_narrative(conn, ev, version: int, analysis: PRAnalysis, input_hash: str, vec: list[float]):
-    pr = parse_pr(ev["payload"])
-    known_paths = changed_files(ev["payload"])
+async def apply_narrative(conn, ev, version: int, analysis: PRAnalysis, input_hash: str,
+                          vec: list[float], enriched_payload: dict):
+    pr = parse_pr(enriched_payload)            # enriched ở maybe_summarize (event gốc bất biến)
+    known_paths = changed_files(enriched_payload)
     known_issues = pr.get("issues", [])
 
     # 1) UPSERT entities (giữ human edit) + contributions (chống trùng) ---
@@ -548,7 +568,7 @@ async def apply_narrative(conn, ev, version: int, analysis: PRAnalysis, input_ha
           set body_md=excluded.body_md, highlights=excluded.highlights, input_hash=excluded.input_hash
         returning id
         """,
-        str(parse_pr(ev["payload"])["number"]),
+        str(pr["number"]),
         pr["title"], analysis.summary_md, _json(analysis.highlights), [ev["id"]],
         MODEL_SUMMARY, version, input_hash, ev["occurred_at"],
     )
@@ -576,6 +596,61 @@ def parse_pr(payload: dict) -> dict:
         "issues": pr.get("_linked_issues", []),
         "diff": pr.get("_diff", ""),     # fetch riêng qua GitHub API khi enrich
     }
+
+
+# ---- PR enrichment (GitHub API, chạy trong worker — KHÔNG ở receiver) ----
+ISSUE_REF_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)", re.I)
+
+
+def extract_linked_issues(body: str | None) -> list[str]:
+    """Linked issues từ PR body theo closing-keyword của GitHub (Fixes #N...)."""
+    if not body:
+        return []
+    seen, out = set(), []
+    for m in ISSUE_REF_RE.finditer(body):
+        key = "#" + m.group(1)
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _build_enriched_pr(payload: dict, files: list[dict], diff: str, issues: list[str]) -> dict:
+    """Inject _files/_diff/_linked_issues vào BẢN SAO payload (event gốc bất
+    biến). parse_pr/changed_files/file_churn đọc các field _ này."""
+    import copy
+    p = copy.deepcopy(payload)
+    pr = p.setdefault("pull_request", {})
+    pr["_files"] = [
+        {"filename": f["filename"], "additions": f.get("additions", 0), "deletions": f.get("deletions", 0)}
+        for f in files
+    ]
+    pr["_diff"] = diff
+    pr["_linked_issues"] = issues
+    return p
+
+
+async def enrich_pr_payload(payload: dict) -> dict:
+    """Webhook PR thiếu diff/files → fetch qua GitHub API. Trả BẢN SAO đã
+    enrich; thiếu repo/number thì trả nguyên payload."""
+    import httpx
+    pr = payload.get("pull_request") or {}
+    repo = (payload.get("repository") or {}).get("full_name")
+    number = pr.get("number")
+    if not repo or not number:
+        return payload
+    token = os.environ.get("GITHUB_TOKEN", "")
+    auth = {"Authorization": f"Bearer {token}"} if token else {}
+    base = f"https://api.github.com/repos/{repo}/pulls/{number}"
+    async with httpx.AsyncClient(timeout=30) as c:
+        fr = await c.get(f"{base}/files", params={"per_page": 100},
+                         headers={**auth, "Accept": "application/vnd.github+json"})
+        fr.raise_for_status()
+        files = fr.json()
+        dr = await c.get(base, headers={**auth, "Accept": "application/vnd.github.v3.diff"})
+        dr.raise_for_status()
+        diff = dr.text
+    return _build_enriched_pr(payload, files, diff, extract_linked_issues(pr.get("body")))
 
 
 def file_churn(payload: dict, path: str) -> tuple[int, int]:
