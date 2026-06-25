@@ -97,3 +97,65 @@ export function getCoChanges(limit = 16): Promise<CoChange[]> {
     return rows.map((r) => ({ a: r.a, b: r.b, weight: r.weight }));
   }, []);
 }
+
+
+// ---- Phase 2B: semantic search -------------------------------------------
+async function embedQuery(text: string): Promise<number[]> {
+  const key = process.env.GEMINI_API_KEY;
+  const res = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=" + key,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "models/gemini-embedding-001",
+        content: { parts: [{ text }] },
+        taskType: "RETRIEVAL_QUERY",
+        outputDimensionality: 1536,
+      }),
+    }
+  );
+  if (!res.ok) throw new Error("gemini embed " + res.status);
+  const j = await res.json();
+  const v: number[] = j.embedding.values;
+  const n = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+  return n > 0 ? v.map((x) => x / n) : v;
+}
+
+export type SearchHit = {
+  content: string;
+  similarity: number;
+  title: string | null;
+  scope: string | null;
+  scopeRef: string | null;
+  sourceUrl: string | null;
+  occurredAt: string | null;
+};
+
+export async function searchBrain(q: string, limit = 12): Promise<SearchHit[]> {
+  return safe(async () => {
+    const vec = await embedQuery(q);
+    const lit = "[" + vec.join(",") + "]";
+    const { rows } = await pool.query(
+      `select e.content,
+              1 - (e.embedding <=> $1::vector) as similarity,
+              e.occurred_at,
+              n.title, n.scope, n.scope_ref,
+              (select source_url from events where id = any(n.source_event_ids) limit 1) as source_url
+       from embeddings e
+       left join narratives n on n.id = e.source_id and e.source_kind = 'pr_summary'
+       order by e.embedding <=> $1::vector
+       limit $2`,
+      [lit, limit]
+    );
+    return rows.map((r) => ({
+      content: r.content,
+      similarity: Number(r.similarity),
+      title: r.title,
+      scope: r.scope,
+      scopeRef: r.scope_ref,
+      sourceUrl: r.source_url,
+      occurredAt: r.occurred_at ? new Date(r.occurred_at).toISOString().slice(0, 10) : null,
+    }));
+  }, []);
+}
