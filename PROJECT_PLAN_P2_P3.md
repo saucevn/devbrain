@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | **Phiên bản** | 0.1 — Draft |
-| **Trạng thái** | Phase 1 đã verify (tests + dry-run trên git history thật); P2/P3 chưa code |
+| **Trạng thái** | ✅ Phase 0/1 + live ingest (Cloudflare Tunnel + GitHub webhook) · ✅ **Phase 2A** (enrichment + narrative Haiku + Gemini embeddings, verified E2E PR #1). ⏳ Còn lại của P2: 2B semantic search, 2C entity-confirm. P3 chưa làm. |
 | **Build ở** | Mac Mini (giữ tiến độ liền mạch) |
 
 ---
@@ -36,11 +36,11 @@ Opus 4.8 / Fable 5 = **thừa** cho pipeline cost-sensitive này.
 
 - **Model:** `gemini-embedding-001`, `output_dimensionality=1536` (cắt MRL), **L2-normalize sau khi cắt**.
 - **task_type:** `RETRIEVAL_DOCUMENT` khi index, `RETRIEVAL_QUERY` khi search (asymmetric).
-- **`EMBED_DIM=1536` đã đúng; `vector(1536)` trong schema đã đúng → KHÔNG migrate.** Việc duy nhất: rewrite `embed()` từ Voyage sang Gemini. (Đây cũng là cách giải mismatch `embed()` gọi voyage-3=1024 cũ.)
+- **`EMBED_DIM=1536` đã đúng; `vector(1536)` trong schema đã đúng → KHÔNG migrate.** ✅ **Done (P2A):** `embed()` đã rewrite Voyage → Gemini (cũng giải mismatch voyage-3=1024 cũ).
 - **Vì sao 1536, không 3072:** pgvector HNSW chỉ index ≤2000 dim; 3072 phải dùng `halfvec`. 1536 dùng `vector` chuẩn, lọt dưới ngưỡng.
 - **Giới hạn input ~2048 token/lần** → docs dài phải **chunk** trước khi embed (PR summary ngắn thì thừa sức).
 - **Lợi VN+EN miễn phí:** đa ngôn ngữ → query tiếng Việt tìm ra code/doc tiếng Anh và ngược lại.
-- `.env`: thêm `GEMINI_API_KEY` (giữ `VOYAGE_API_KEY` cũng được để fallback).
+- `.env`: ✅ đã thêm `GEMINI_API_KEY`; **đã bỏ** `VOYAGE_API_KEY` khỏi `.env.example` (không còn fallback Voyage). Cũng cần `GITHUB_TOKEN` thật (enrichment) — đã set từ `gh auth token`.
 
 ### 0.4 Đòn cost
 
@@ -68,11 +68,11 @@ Lane AI bật lên. Chuỗi 5 mắt xích, **build theo thứ tự** (enrichment
 
 | # | Mắt xích | Chạy ở | Golden rule then chốt |
 |---|---|---|---|
-| 1 | Enrichment | worker | Enrich trong worker, **không** receiver; cache content vào `payload` (replay khỏi gọi lại API) |
-| 2 | Narrative projector | worker | LLM call **NGOÀI** transaction; write projection + advance cursor **TRONG** 1 transaction |
-| 3 | Embeddings | worker | content-hash skip; `EMBED_DIM` khớp `vector(N)` |
-| 4 | Semantic search | Next.js + RPC | Kết quả **link ngược source event** để verify |
-| 5 | Entity-confirm UI | Next.js | UPSERT on-conflict **chỉ** bump `last_seen_at` — không đè `display_name`/`pyramid_layer`/`resolution_status` |
+| 1 ✅ | Enrichment | worker | **Done (P2A):** `enrich_pr_payload` fetch files/diff/issues → inject `_files/_diff/_linked_issues` vào BẢN SAO payload (event bất biến, không cache vào event gốc) |
+| 2 ✅ | Narrative projector | worker | **Done (P2A):** LLM **NGOÀI** tx; write+cursor **TRONG** 1 tx; `_coerce_analysis` chịu output lệch enum (không poison PR) |
+| 3 ✅ | Embeddings | worker | **Done (P2A):** Gemini@1536 (normalized); content-hash skip; khớp `vector(1536)` |
+| 4 ⏳ | Semantic search | Next.js + RPC | Kết quả **link ngược source event** để verify (← next) |
+| 5 ⏳ | Entity-confirm UI | Next.js | UPSERT on-conflict **chỉ** bump `last_seen_at` — không đè `display_name`/`pyramid_layer`/`resolution_status` |
 
 ### 1.1 Enrichment (tiền đề)
 Webhook gốc thiếu nội dung → worker fetch và nhồi vào `payload` (đúng shape `parse_pr`/`changed_files` đã đọc):
@@ -94,7 +94,7 @@ Search box → embed query (`RETRIEVAL_QUERY`) → RPC `match_embeddings` (cosin
 AI đề xuất entity `resolution_status='proposed'`; `guard_canonical_key` chặn hallucination (file phải khớp path thật, module phải là prefix, epic phải khớp issue key). UI để dev confirm/rename → ghi field người sở hữu. Mỗi lần AI gặp lại entity **không** đè nhãn người đã sửa.
 
 ### 1.5 Exit criteria P2
-- [ ] PR merged (qua webhook + enrich) → diary entry tự sinh.
+- [x] PR merged (qua webhook + enrich) → diary entry tự sinh. ✅ **(P2A, verified PR #1)**
 - [ ] Lark doc / import doc → summary + embedding.
 - [ ] Search ngữ nghĩa trả kết quả **có citation**; query VN tìm được doc/code EN.
 - [ ] Dev confirm 1 entity; **replay projector không phá nhãn đó** (test `guard_canonical_key` + UPSERT).

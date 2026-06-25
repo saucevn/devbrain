@@ -4,9 +4,9 @@
 
 | | |
 |---|---|
-| **Phiên bản** | 0.1 — Draft |
-| **Ngày** | 2026-06-24 |
-| **Trạng thái** | Sẵn sàng khởi động Phase 0 |
+| **Phiên bản** | 0.2 |
+| **Ngày** | 2026-06-25 |
+| **Trạng thái** | ✅ Phase 0 · ✅ Phase 1 (backfill + projectors + dashboard) · ✅ live ingest (Cloudflare Tunnel + GitHub webhook) · ✅ **Phase 2A** (AI narrative + Gemini embeddings + enrichment, verified E2E). Kế: P2B search → P2C entity-confirm → P3. Deep-dive: [PROJECT_PLAN_P2_P3.md](PROJECT_PLAN_P2_P3.md) |
 | **Hạ tầng nền** | Docker Compose all-in-one (VPS *hoặc* Mac) · Cloudflare Tunnel · Postgres local + backup R2 |
 
 ---
@@ -79,7 +79,7 @@ Sources (webhook + backfill)
 | Database | **Postgres 16 + pgvector** (`pgvector/pgvector:pg16`) | Local trong compose; schema event-sourced (migration 001 + 002) |
 | AI — summarize | **Claude Haiku 4.5** | Bulk PR summary, structured output qua forced tool_use |
 | AI — rollup | **Claude Sonnet 4.6** | Nhật ký tổng hợp tuần/release |
-| Embeddings | **Voyage-3** hoặc **Cohere multilingual** | Quan trọng cho nội dung VN+EN trộn; khớp `vector(N)` trong schema |
+| Embeddings | **Gemini `gemini-embedding-001` @1536** (L2-normalized; `RETRIEVAL_DOCUMENT`/`_QUERY`) | ✅ Đã chốt & triển khai (P2A). Khớp `vector(1536)` → không migrate. VN+EN multilingual |
 | Enrichment | **GitHub API** | Fetch diff + linked issues (webhook gốc không kèm đủ) |
 
 > **Vì sao hai ngôn ngữ?** Frontend TS/Next, pipeline Python — vì hệ sinh thái AI/data-processing là Python-native (Pydantic, ARQ) và khớp kỹ năng sẵn có. Split có chủ đích, không phải tình cờ.
@@ -177,6 +177,8 @@ Image đều multi-arch nên chuyển host = copy `.env` sang máy mới rồi `
 
 ## 6. Lộ trình theo phase
 
+> **Tiến độ (2026-06-25):** ✅ Phase 0 · ✅ Phase 1 · ✅ live ingest · ✅ **Phase 2A** (narrative Haiku + Gemini embeddings + GitHub enrichment, verified E2E trên PR #1). ⏳ Phase 2B (semantic search) · 2C (entity-confirm) · Phase 3+ chưa làm.
+
 Nguyên tắc thứ tự: **làm cái hữu ích trước cái long lanh**. Event log + dashboard deterministic chạy được *trước khi* tốn một đồng LLM nào. Graph 3D làm **cuối cùng**, sau khi entity resolution đã chắc.
 
 | Phase | Mục tiêu | Deliverable chính | Exit criteria | Ước lượng* |
@@ -247,7 +249,7 @@ Nguyên tắc thứ tự: **làm cái hữu ích trước cái long lanh**. Even
 ## 10. Câu hỏi mở / cần chốt
 
 1. **Person identity resolution** — team nhỏ & ổn định thì map thẳng `actor` thô được; cần thì mở rộng `person` entity + aliases sau (không phải sửa schema).
-2. **Embedding provider** — Voyage-3 vs Cohere multilingual vs OpenAI 3-large cho VN+EN? (ảnh hưởng dimension cột `vector(N)`).
+2. ✅ **Embedding provider — CHỐT: Gemini `gemini-embedding-001` @1536** (L2-normalized, `RETRIEVAL_DOCUMENT`/`_QUERY`). Khớp `vector(1536)` sẵn có → không migrate; đã triển khai trong `embed()` (P2A).
 3. **Frontend host** — Cloudflare Pages (zero-ops, mặc định) hay compose profile `frontend` để self-host cùng stack?
 4. **Nguồn ngoài git** — sau Phase 2 cần adapter cho Jira/Linear? Notion/Obsidian/Lark Wiki? (quyết định ingestion adapters).
 5. **Team size / velocity** — để chốt lại timeline ở Mục 6.
