@@ -129,3 +129,12 @@ def test_fan_out_push_skips_commit_without_sha():
     ]}
     evs = pipeline.fan_out_github("push", p, "d")
     assert [e["source_event_id"] for e in evs] == ["sha1"]
+
+
+# ---- Phase 3 roadmap: milestone state/action → roadmap status --------------
+def test_milestone_status_mapping():
+    assert pipeline.milestone_status("created", "open") == "planned"
+    assert pipeline.milestone_status("opened", "open") == "in_progress"
+    assert pipeline.milestone_status("edited", "open") == "in_progress"
+    assert pipeline.milestone_status("closed", "closed") == "shipped"
+    assert pipeline.milestone_status("edited", "closed") == "shipped"

@@ -66,7 +66,7 @@ SWEEP_BATCH    = 200          # số event đọc mỗi lượt sweep
 DEBOUNCE_SEC   = 30           # gom nhiều webhook trong cửa sổ này thành 1 sweep
 DIFF_CHAR_CAP  = 12_000       # cắt diff để khống chế token (C2/C5)
 
-PROJECTORS = ("metrics", "graph", "narrative")   # mỗi cái có cursor riêng
+PROJECTORS = ("metrics", "graph", "narrative", "status")   # mỗi cái có cursor riêng
 
 anthropic = AsyncAnthropic(api_key=ANTHROPIC_KEY)
 
@@ -192,8 +192,22 @@ def normalize_github(event: str, p: dict) -> tuple[str, datetime, str | None, st
         hc = p.get("head_commit") or {}
         actor = (p.get("pusher") or {}).get("name")
         return "commit.pushed", _parse_ts(hc.get("timestamp")), actor, p.get("compare")
+    if event == "milestone":
+        ms = p.get("milestone") or {}
+        action = p.get("action") or "updated"
+        return (f"milestone.{action}", _parse_ts(ms.get("updated_at")),
+                (p.get("sender") or {}).get("login"), ms.get("html_url"))
     # ... thêm issue.resolved, doc.updated tuỳ nguồn
     return f"{event}.raw", _parse_ts(p.get("created_at")), None, None
+
+
+def milestone_status(action: str, state: str) -> str:
+    """Map milestone action/state → roadmap status (planned/in_progress/shipped)."""
+    if action == "closed" or state == "closed":
+        return "shipped"
+    if action == "created":
+        return "planned"
+    return "in_progress"
 
 
 def _parse_ts(s: str | None) -> datetime:
@@ -522,6 +536,8 @@ async def process_event(pool, name: str, ev, version: int):
             await apply_cochange(conn, ev, version)  # co_changed_with: tín hiệu graph MIỄN PHÍ
         elif name == "narrative" and precomputed is not None:
             await apply_narrative(conn, ev, version, *precomputed)
+        elif name == "status":
+            await apply_status(conn, ev, version)   # roadmap: milestone → status_history
 
         # advance cursor per-event → crash chỉ phải xem lại event đang dở
         await conn.execute(
@@ -582,6 +598,30 @@ async def apply_cochange(conn, ev, version):
                 """,
                 a, b, ts, version,
             )
+
+
+# ---- status projector (roadmap: milestone → entity_status_history) ----
+async def apply_status(conn, ev, version):
+    """Milestone event → epic entity + 1 transition vào entity_status_history.
+    Deterministic (derived từ milestone facts), KHÔNG AI. Projection rebuildable
+    → truncate trước khi replay."""
+    if not ev["event_type"].startswith("milestone."):
+        return
+    p = ev["payload"]
+    ms = p.get("milestone") or {}
+    number = ms.get("number")
+    repo = (p.get("repository") or {}).get("full_name")
+    if number is None or not repo:
+        return
+    status = milestone_status(p.get("action") or "", ms.get("state") or "")
+    eid = await upsert_entity(conn, "epic", f"milestone:{repo}#{number}", ms.get("title") or f"#{number}")
+    await conn.execute(
+        """
+        insert into entity_status_history (entity_id, status, changed_at, source_event_id)
+        values ($1, $2, $3, $4)
+        """,
+        eid, status, ev["occurred_at"], ev["id"],
+    )
 
 
 # ---- AI projector (đắt, đã lọc + cache) ------------------------------

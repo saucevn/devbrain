@@ -249,3 +249,29 @@ export function getPyramid(): Promise<PyramidBlock[]> {
     }));
   }, []);
 }
+
+
+// ---- Phase 3: roadmap (status_history → by year) --------------------------
+export type RoadmapItem = {
+  entity: string;
+  status: string;
+  year: number;
+  changedAt: string;
+  evidenceUrl: string | null;
+};
+
+export function getRoadmap(): Promise<RoadmapItem[]> {
+  return safe(async () => {
+    const { rows } = await pool.query(
+      `select display_name, status, year, changed_at, evidence_url
+       from roadmap order by year desc, changed_at desc`
+    );
+    return rows.map((r) => ({
+      entity: r.display_name,
+      status: r.status,
+      year: r.year,
+      changedAt: r.changed_at ? new Date(r.changed_at).toISOString().slice(0, 10) : "",
+      evidenceUrl: r.evidence_url,
+    }));
+  }, []);
+}

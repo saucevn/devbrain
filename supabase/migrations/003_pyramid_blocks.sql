@@ -38,3 +38,6 @@ insert into pyramid_blocks (key, name, layer, position, maturity, risk_class, de
  ('dashboard','Dashboard',2,1,60,'in_progress','Next.js heat / co-change / search / entities'),
  ('docs','Docs & Plans',3,0,90,'low','PROJECT_PLAN, CLAUDE.md, ADRs')
 on conflict (key) do nothing;
+
+-- Phase 3 roadmap: status projector checkpoint (milestone → entity_status_history)
+insert into projection_checkpoints (projector_name) values ('status') on conflict do nothing;
