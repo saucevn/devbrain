@@ -304,6 +304,39 @@ PR_SYSTEM_PROMPT = (
 # =====================================================================
 # AI CALLS  (C3 model tiering · C6 prompt caching · structured via tool_use)
 # =====================================================================
+_ALLOWED_KINDS = {"module", "file", "service", "feature", "epic", "doc"}
+_ALLOWED_RELATIONS = {"created", "modified", "fixed_bug_in", "documented", "deprecated"}
+_ALLOWED_EDGES = {"depends_on", "documented_by", "implements"}
+_EDGE_SYNONYMS = {"documents": "documented_by", "documented": "documented_by",
+                  "depends": "depends_on", "implement": "implements"}
+_RELATION_SYNONYMS = {"documents": "documented", "document": "documented",
+                      "fixed": "fixed_bug_in", "fix": "fixed_bug_in",
+                      "create": "created", "modify": "modified", "update": "modified"}
+
+
+def _coerce_analysis(raw: dict) -> dict:
+    """Forced tool_use KHÔNG ép cứng enum → một edge_type/relation lạ sẽ làm
+    model_validate fail và poison cả PR. Remap synonym đã biết, DROP edge/entity
+    còn invalid (giữ phần hợp lệ) thay vì hỏng toàn bộ."""
+    raw = dict(raw)
+    edges = []
+    for e in raw.get("edges") or []:
+        et = _EDGE_SYNONYMS.get(str(e.get("edge_type", "")).lower(), e.get("edge_type"))
+        if et in _ALLOWED_EDGES:
+            edges.append({**e, "edge_type": et})
+    raw["edges"] = edges
+    ents = []
+    for en in raw.get("entities") or []:
+        if en.get("kind") not in _ALLOWED_KINDS:
+            continue
+        rel = _RELATION_SYNONYMS.get(str(en.get("relation", "")).lower(), en.get("relation"))
+        if rel not in _ALLOWED_RELATIONS:
+            rel = "modified"
+        ents.append({**en, "relation": rel})
+    raw["entities"] = ents
+    return raw
+
+
 async def summarize_pr(pr: dict) -> PRAnalysis:
     """1 LLM call/PR, output ép theo schema bằng forced tool_use."""
     file_list = "\n".join(pr["files"]) or "(none)"
@@ -332,7 +365,7 @@ async def summarize_pr(pr: dict) -> PRAnalysis:
         messages=[{"role": "user", "content": user_block}],
     )
     block = next(b for b in resp.content if b.type == "tool_use")
-    return PRAnalysis.model_validate(block.input)
+    return PRAnalysis.model_validate(_coerce_analysis(block.input))
 
 
 async def embed(text: str, task_type: str = "RETRIEVAL_DOCUMENT") -> list[float]:

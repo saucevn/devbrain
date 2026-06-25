@@ -53,3 +53,42 @@ def test_build_enriched_pr_injects_fields_without_mutating_original():
     assert parsed["diff"] == "DIFFTEXT"
     assert parsed["issues"] == ["#9"]
     assert parsed["files"] == ["a.py", "b.py"]
+
+
+# ---- _coerce_analysis: tolerate out-of-enum LLM output (don't poison PR) ----
+def test_coerce_remaps_and_drops_invalid_edges():
+    raw = {
+        "summary_md": "x", "highlights": [],
+        "entities": [{"canonical_key": "a.py", "display_name": "a", "kind": "file", "relation": "created"}],
+        "edges": [
+            {"from_key": "a.py", "to_key": "b.py", "edge_type": "documents"},    # synonym → documented_by
+            {"from_key": "a.py", "to_key": "c.py", "edge_type": "depends_on"},   # valid
+            {"from_key": "a.py", "to_key": "d.py", "edge_type": "bogus"},        # drop
+        ],
+    }
+    out = pipeline._coerce_analysis(raw)
+    assert [e["edge_type"] for e in out["edges"]] == ["documented_by", "depends_on"]
+
+
+def test_coerce_drops_invalid_kind_and_fixes_relation():
+    raw = {
+        "summary_md": "x", "highlights": [],
+        "entities": [
+            {"canonical_key": "a.py", "display_name": "a", "kind": "file", "relation": "documents"},  # → documented
+            {"canonical_key": "z", "display_name": "z", "kind": "galaxy", "relation": "created"},      # bad kind → drop
+        ],
+        "edges": [],
+    }
+    out = pipeline._coerce_analysis(raw)
+    assert len(out["entities"]) == 1
+    assert out["entities"][0]["relation"] == "documented"
+
+
+def test_coerce_result_validates_against_pranalysis():
+    raw = {
+        "summary_md": "s", "highlights": ["h"],
+        "entities": [{"canonical_key": "a.py", "display_name": "a", "kind": "file", "relation": "created"}],
+        "edges": [{"from_key": "a.py", "to_key": "b.py", "edge_type": "documents"}],
+    }
+    obj = pipeline.PRAnalysis.model_validate(pipeline._coerce_analysis(raw))
+    assert obj.edges[0].edge_type == "documented_by"
