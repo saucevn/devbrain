@@ -257,6 +257,69 @@ export function getPyramid(): Promise<PyramidBlock[]> {
   }, []);
 }
 
+// ---- Phase 4: knowledge graph (subgraph-by-query) -------------------------
+// Render a SUBGRAPH around one seed entity — never the whole graph (PROJECT_PLAN
+// decision: react-force-graph/whole-graph doesn't scale; query + cap instead).
+export type GraphNode = { id: string; key: string; name: string; kind: string; seed: boolean };
+export type GraphEdge = { source: string; target: string; type: string; weight: number };
+export type Subgraph = { center: string | null; centerName: string | null; nodes: GraphNode[]; edges: GraphEdge[] };
+
+// per-alias copy of STRIP (the shared macro is hard-coded to alias `e.`).
+const stripFor = (a: string) =>
+  `case when ${a}.project is not null and ${a}.canonical_key like ${a}.project || ':%' ` +
+  `then substr(${a}.canonical_key, length(${a}.project) + 2) else ${a}.canonical_key end`;
+
+export function getSubgraph(seed?: string, cap = 18): Promise<Subgraph> {
+  return safe(async () => {
+    // Resolve the seed: explicit query (key / path basename / display name),
+    // else fall back to the most-connected entity so /graph always shows something.
+    const seedRow = seed
+      ? (
+          await pool.query(
+            `select e.id, ${STRIP} as key, e.display_name as name
+             from entities e
+             where (${STRIP}) = $1 or e.display_name ilike $1 or e.canonical_key like '%/' || $1
+             order by e.last_seen_at desc limit 1`,
+            [seed]
+          )
+        ).rows[0]
+      : (
+          await pool.query(
+            `select e.id, ${STRIP} as key, e.display_name as name, count(ed.*) as deg
+             from entities e
+             join entity_edges ed on ed.from_entity = e.id or ed.to_entity = e.id
+             group by e.id order by deg desc limit 1`
+          )
+        ).rows[0];
+    if (!seedRow) return { center: null, centerName: null, nodes: [], edges: [] };
+
+    const { rows } = await pool.query(
+      `select ed.from_entity as src, ed.to_entity as tgt, ed.edge_type as type, ed.weight::int as weight,
+              fe.display_name as fname, fe.entity_kind as fkind, ${stripFor("fe")} as fkey,
+              te.display_name as tname, te.entity_kind as tkind, ${stripFor("te")} as tkey
+       from entity_edges ed
+       join entities fe on fe.id = ed.from_entity
+       join entities te on te.id = ed.to_entity
+       where ed.from_entity = $1 or ed.to_entity = $1
+       order by ed.weight desc
+       limit $2`,
+      [seedRow.id, cap]
+    );
+
+    const nodes = new Map<string, GraphNode>();
+    const add = (id: string, key: string, name: string, kind: string) => {
+      if (!nodes.has(id)) nodes.set(id, { id, key, name, kind, seed: id === seedRow.id });
+    };
+    add(seedRow.id, seedRow.key, seedRow.name, "seed");
+    const edges: GraphEdge[] = rows.map((r) => {
+      add(r.src, r.fkey, r.fname, r.fkind);
+      add(r.tgt, r.tkey, r.tname, r.tkind);
+      return { source: r.src, target: r.tgt, type: r.type, weight: r.weight };
+    });
+    return { center: seedRow.id, centerName: seedRow.name, nodes: [...nodes.values()], edges };
+  }, { center: null, centerName: null, nodes: [], edges: [] });
+}
+
 // ---- Phase 3: roadmap (status_history → by year) --------------------------
 export type RoadmapItem = {
   entity: string;
