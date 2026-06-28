@@ -37,10 +37,11 @@ export default async function Graph({
 
   return (
     <div className="mx-auto max-w-4xl px-5 py-10 sm:px-8">
-      <header className="rise flex items-center justify-between gap-4 border-b border-line pb-6">
-        <a href="/" className="font-mono text-sm text-muted hover:text-fg">← devbrain</a>
+      <header className="rise flex items-center justify-between gap-4">
+        <a href="/" className="font-mono text-sm text-muted transition-colors hover:text-accent">← devbrain</a>
         <span className="font-mono text-xs text-muted">knowledge graph · subgraph-by-query</span>
       </header>
+      <h1 className="rise display mt-8 text-5xl"><span className="grad-text">Knowledge graph</span></h1>
 
       <form action="/graph" method="get" className="rise mt-6 flex gap-2">
         <input

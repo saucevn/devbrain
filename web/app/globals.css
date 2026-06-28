@@ -1,23 +1,34 @@
 @import "tailwindcss";
 
+/* =====================================================================
+   devbrain — "Terminal Observatory" / editorial-diary theme
+   Newsreader (serif, VN-capable) = display + narrative prose.
+   JetBrains Mono = data, labels, nav, code.
+   Teal→amber is the signature gradient (brand / hero / active).
+   ===================================================================== */
 @theme {
-  --font-sans: var(--font-plex), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-newsreader), Georgia, "Times New Roman", serif;
+  --font-sans: var(--font-newsreader), Georgia, serif;
   --font-mono: var(--font-jbmono), ui-monospace, "SF Mono", monospace;
 
-  --color-bg: #0a0c10;
-  --color-panel: #11151c;
-  --color-line: #1c2230;
-  --color-fg: #e7ebf2;
-  --color-muted: #7b8696;
-  --color-accent: #57e0c8;
-  --color-amber: #f0a23b;
+  /* layered dark base */
+  --color-bg: #07090e;
+  --color-panel: #0d111a;
+  --color-raised: #131a26;
+  --color-line: #1b2331;
+  --color-line-soft: #141a26;
+  --color-fg: #e9eef6;
+  --color-muted: #828da0;
+  --color-accent: #5fe3cb;   /* teal — primary */
+  --color-amber: #f6a93f;    /* amber — secondary / gradient terminus */
 }
 
-/* Heat scale: kept as plain :root vars (NOT @theme) because they're applied via
-   inline style, which Tailwind's tree-shaker can't see → it would drop them. */
+/* Applied via inline style (Tailwind can't tree-shake these) → keep in :root */
 :root {
-  --color-heat-0: #131822;
-  --color-heat-1: #173243;
+  --grad-brand: linear-gradient(102deg, #5fe3cb 0%, #7fe0b0 40%, #f6a93f 100%);
+
+  --color-heat-0: #101620;
+  --color-heat-1: #16323f;
   --color-heat-2: #1d6f63;
   --color-heat-3: #b88a36;
   --color-heat-4: #db6a2c;
@@ -26,22 +37,96 @@
 
 * { border-color: var(--color-line); }
 html, body { height: 100%; }
+html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
 
 body {
   background-color: var(--color-bg);
   color: var(--color-fg);
   font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.65;
+  /* atmosphere: soft teal/amber glow up top, faded technical grid */
   background-image:
-    linear-gradient(to right, rgba(28, 34, 48, 0.4) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(28, 34, 48, 0.4) 1px, transparent 1px);
-  background-size: 40px 40px;
+    radial-gradient(900px 480px at 18% -8%, rgba(95, 227, 203, 0.10), transparent 70%),
+    radial-gradient(820px 460px at 92% -12%, rgba(246, 169, 63, 0.08), transparent 70%),
+    linear-gradient(to right, rgba(28, 34, 48, 0.30) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(28, 34, 48, 0.30) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 44px 44px, 44px 44px;
   background-attachment: fixed;
 }
 
 ::selection { background: var(--color-accent); color: #06221d; }
 
+/* refined scrollbar */
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-thumb {
+  background: #1f2735; border: 3px solid var(--color-bg); border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover { background: #2a3445; }
+
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; border-radius: 4px; }
+
+/* ---- typography helpers ------------------------------------------------ */
+.font-display { font-family: var(--font-display); }
+.display {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+.prose-serif { font-family: var(--font-display); font-weight: 400; line-height: 1.7; }
+
+/* brand gradient text */
+.grad-text {
+  background: var(--grad-brand);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ---- surfaces ---------------------------------------------------------- */
+/* glassy raised panel — subtle blur + top highlight + depth shadow */
+.panel-glass {
+  background: linear-gradient(180deg, rgba(19, 26, 38, 0.72), rgba(13, 17, 26, 0.72));
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--color-line);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 14px 40px -28px rgba(0, 0, 0, 0.9);
+}
+.panel-glass.lift:hover {
+  border-color: color-mix(in oklab, var(--color-accent) 40%, var(--color-line));
+  transform: translateY(-2px);
+  transition: transform 0.18s ease, border-color 0.18s ease;
+}
+
+/* gradient hairline divider */
+.rule-brand { height: 1px; background: linear-gradient(90deg, var(--color-accent), transparent 70%); opacity: 0.5; }
+
+/* soft accent glow (place behind hero / active chips) */
+.glow-accent { box-shadow: 0 0 90px -24px rgba(95, 227, 203, 0.55); }
+
+/* live pulse dot */
+.pulse { box-shadow: 0 0 0 0 rgba(95, 227, 203, 0.6); animation: pulse 2.4s infinite; }
+@keyframes pulse {
+  70% { box-shadow: 0 0 0 9px rgba(95, 227, 203, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(95, 227, 203, 0); }
+}
+
+/* ---- motion: staggered reveal ----------------------------------------- */
 @keyframes rise {
-  from { opacity: 0; transform: translateY(8px); }
+  from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: translateY(0); }
 }
-.rise { animation: rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.rise { animation: rise 0.55s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.stagger > * { animation: rise 0.55s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.stagger > *:nth-child(1) { animation-delay: 0.02s; }
+.stagger > *:nth-child(2) { animation-delay: 0.06s; }
+.stagger > *:nth-child(3) { animation-delay: 0.10s; }
+.stagger > *:nth-child(4) { animation-delay: 0.14s; }
+.stagger > *:nth-child(5) { animation-delay: 0.18s; }
+.stagger > *:nth-child(6) { animation-delay: 0.22s; }
+.stagger > *:nth-child(7) { animation-delay: 0.26s; }
+.stagger > *:nth-child(8) { animation-delay: 0.30s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .rise, .stagger > *, .pulse { animation: none; }
+}

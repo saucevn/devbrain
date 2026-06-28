@@ -14,10 +14,11 @@ export default async function Roadmap() {
 
   return (
     <div className="mx-auto max-w-3xl px-5 py-10 sm:px-8">
-      <header className="rise flex items-center justify-between gap-4 border-b border-line pb-6">
-        <a href="/" className="font-mono text-sm text-muted hover:text-fg">← devbrain</a>
+      <header className="rise flex items-center justify-between gap-4">
+        <a href="/" className="font-mono text-sm text-muted transition-colors hover:text-accent">← devbrain</a>
         <span className="font-mono text-xs text-muted">roadmap · GitHub milestones</span>
       </header>
+      <h1 className="rise display mt-8 text-5xl"><span className="grad-text">Roadmap</span></h1>
 
       <p className="rise mt-6 text-sm leading-6 text-muted">
         Dòng thời gian từ <span className="text-fg">entity_status_history</span> (milestone → status
