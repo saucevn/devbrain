@@ -69,3 +69,10 @@ def test_highlights_empty_list_stays_list():
     args = _run_apply([])
     assert args[3] == []
     assert isinstance(args[3], list)
+
+
+def test_scope_ref_namespaced_by_repo():
+    # _enriched() is repo "o/r" PR #7 → scope_ref must be repo-namespaced so two
+    # repos' same PR number can't collide on (scope, scope_ref, version).
+    args = _run_apply(["x"])
+    assert args[0] == "o/r#7"
