@@ -38,14 +38,15 @@ export default async function Pyramid({
 
   return (
     <div className="mx-auto max-w-5xl px-5 py-10 sm:px-8">
-      <header className="rise flex items-center justify-between gap-4 border-b border-line pb-6">
-        <a href="/" className="font-mono text-sm text-muted hover:text-fg">← devbrain</a>
+      <header className="rise flex items-center justify-between gap-4">
+        <a href="/" className="font-mono text-sm text-muted transition-colors hover:text-accent">← devbrain</a>
         <div className="flex items-center gap-3 font-mono text-xs">
           <span className="text-muted">heat:</span>
           <a href="/pyramid?mode=activity" className={m === "activity" ? "text-accent" : "text-muted hover:text-fg"}>activity</a>
           <a href="/pyramid?mode=maturity" className={m === "maturity" ? "text-accent" : "text-muted hover:text-fg"}>maturity</a>
         </div>
       </header>
+      <h1 className="rise display mt-8 text-5xl"><span className="grad-text">Capability pyramid</span></h1>
 
       <p className="rise mt-6 text-sm leading-6 text-muted">
         Kim tự tháp năng lực — <span className="text-fg">block do người định nghĩa</span> (layer,
