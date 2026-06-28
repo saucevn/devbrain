@@ -706,7 +706,11 @@ async def apply_narrative(conn, ev, version: int, analysis: PRAnalysis, input_ha
         returning id
         """,
         str(pr["number"]),
-        pr["title"], analysis.summary_md, _json(analysis.highlights), [ev["id"]],
+        # highlights is a list → pass it directly so the jsonb codec
+        # (_init_connection) encodes a real jsonb array. Wrapping it in
+        # json.dumps() first double-encodes it into a jsonb *string* scalar
+        # (breaks jsonb_array_length / array access).
+        pr["title"], analysis.summary_md, analysis.highlights, [ev["id"]],
         MODEL_SUMMARY, version, input_hash, ev["occurred_at"],
     )
 
@@ -795,11 +799,6 @@ def file_churn(payload: dict, path: str) -> tuple[int, int]:
         if f["filename"] == path:
             return f.get("additions", 0), f.get("deletions", 0)
     return 0, 0
-
-
-def _json(obj) -> str:
-    import json
-    return json.dumps(obj, ensure_ascii=False)
 
 
 # =====================================================================
