@@ -257,6 +257,51 @@ export function getPyramid(): Promise<PyramidBlock[]> {
   }, []);
 }
 
+// ---- Leverage #3: stale-doc / knowledge-drift (deterministic) -------------
+// High-signal, NO AI scoring: a doc whose RELATED CODE (co-change / documented_by
+// neighbors) churned recently while the doc itself sat untouched is likely stale.
+// Pure git facts: metrics_daily churn (30d) + entity links + doc last_seen_at.
+export type StaleDoc = {
+  doc: string;
+  key: string;
+  neighborChurn30d: number;
+  neighbors: number;
+  docAgeDays: number;
+};
+
+export function getStaleDocs(limit = 20): Promise<StaleDoc[]> {
+  return safe(async () => {
+    const { rows } = await pool.query(
+      `with dnc as (
+         select d.id, d.display_name as doc, ${stripFor("d")} as key, d.last_seen_at as doc_last,
+                coalesce(sum((m.lines_added + m.lines_removed))
+                         filter (where m.day >= current_date - 30), 0) as churn30,
+                count(distinct nb.id) as neighbors
+         from entities d
+         join entity_edges e on (e.from_entity = d.id or e.to_entity = d.id)
+         join entities nb on nb.id = case when e.from_entity = d.id then e.to_entity else e.from_entity end
+         left join metrics_daily m on m.entity_id = nb.id
+         where d.entity_kind = 'doc'
+         group by d.id
+       )
+       select doc, key, churn30::int as churn30, neighbors::int as neighbors,
+              (current_date - doc_last::date) as doc_age_days
+       from dnc
+       where churn30 > 0
+       order by churn30 desc, doc_age_days desc
+       limit $1`,
+      [limit]
+    );
+    return rows.map((r) => ({
+      doc: r.doc,
+      key: r.key,
+      neighborChurn30d: r.churn30,
+      neighbors: r.neighbors,
+      docAgeDays: r.doc_age_days,
+    }));
+  }, []);
+}
+
 // ---- Changelog feed (narrative prose, newest first) -----------------------
 // The "living changelog" tagline made literal: render the AI narratives as a
 // dated diary, each entry citing its source event (golden rule: verifiable).
