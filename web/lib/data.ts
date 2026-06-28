@@ -257,6 +257,47 @@ export function getPyramid(): Promise<PyramidBlock[]> {
   }, []);
 }
 
+// ---- Changelog feed (narrative prose, newest first) -----------------------
+// The "living changelog" tagline made literal: render the AI narratives as a
+// dated diary, each entry citing its source event (golden rule: verifiable).
+export type ChangelogEntry = {
+  title: string | null;
+  summary: string;
+  highlights: string[];
+  pr: string | null;
+  project: string | null;
+  sourceUrl: string | null;
+  date: string | null;
+};
+
+export function getChangelog(limit = 50): Promise<ChangelogEntry[]> {
+  return safe(async () => {
+    const { rows } = await pool.query(
+      `select n.title, n.body_md, n.highlights, n.scope_ref, n.period_start,
+              ev.source_url,
+              ev.payload -> 'repository' ->> 'full_name' as project
+       from narratives n
+       left join lateral (
+         select source_url, payload from events
+         where id = any(n.source_event_ids) limit 1
+       ) ev on true
+       order by n.period_start desc nulls last, n.scope_ref desc
+       limit $1`,
+      [limit]
+    );
+    return rows.map((r) => ({
+      title: r.title,
+      summary: r.body_md,
+      // highlights is now a real jsonb array (fixed double-encoding) → JS array.
+      highlights: Array.isArray(r.highlights) ? r.highlights : [],
+      pr: r.scope_ref ? `#${r.scope_ref}` : null,
+      project: r.project,
+      sourceUrl: r.source_url,
+      date: r.period_start ? new Date(r.period_start).toISOString().slice(0, 10) : null,
+    }));
+  }, []);
+}
+
 // ---- Phase 4: knowledge graph (subgraph-by-query) -------------------------
 // Render a SUBGRAPH around one seed entity — never the whole graph (PROJECT_PLAN
 // decision: react-force-graph/whole-graph doesn't scale; query + cap instead).
