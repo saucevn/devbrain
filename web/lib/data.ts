@@ -290,7 +290,8 @@ export function getChangelog(limit = 50): Promise<ChangelogEntry[]> {
       summary: r.body_md,
       // highlights is now a real jsonb array (fixed double-encoding) → JS array.
       highlights: Array.isArray(r.highlights) ? r.highlights : [],
-      pr: r.scope_ref ? `#${r.scope_ref}` : null,
+      // scope_ref is namespaced ('{repo}#N') → show just the PR number (project shown separately).
+      pr: r.scope_ref ? `#${String(r.scope_ref).split("#").pop()}` : null,
       project: r.project,
       sourceUrl: r.source_url,
       date: r.period_start ? new Date(r.period_start).toISOString().slice(0, 10) : null,

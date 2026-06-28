@@ -705,7 +705,10 @@ async def apply_narrative(conn, ev, version: int, analysis: PRAnalysis, input_ha
           set body_md=excluded.body_md, highlights=excluded.highlights, input_hash=excluded.input_hash
         returning id
         """,
-        str(pr["number"]),
+        # scope_ref is namespaced by repo ('{repo}#N') so two repos' same PR
+        # number don't collide on the (scope, scope_ref, version) natural key
+        # (mirrors the entity canonical_key '{repo}:{path}' namespacing).
+        (f"{proj}#{pr['number']}" if proj else str(pr["number"])),
         # highlights is a list → pass it directly so the jsonb codec
         # (_init_connection) encodes a real jsonb array. Wrapping it in
         # json.dumps() first double-encodes it into a jsonb *string* scalar
