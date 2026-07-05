@@ -65,6 +65,7 @@ EMBED_DIM      = 1536                           # PHẢI khớp vector(N) trong 
 SWEEP_BATCH    = 200          # số event đọc mỗi lượt sweep
 DEBOUNCE_SEC   = 30           # gom nhiều webhook trong cửa sổ này thành 1 sweep
 DIFF_CHAR_CAP  = 12_000       # cắt diff để khống chế token (C2/C5)
+MAX_BODY_BYTES = 10 * 1024 * 1024   # GitHub tự cap payload 25MB; ta chặn sớm ở 10MB
 
 PROJECTORS = ("metrics", "graph", "narrative", "status")   # mỗi cái có cursor riêng
 
@@ -131,6 +132,19 @@ async def health():
     return {"ok": True, "db": db_ok}
 
 
+def check_webhook_guards(secret: bytes, delivery_id: str, content_length: str | None) -> None:
+    """Fail-closed guards chạy TRƯỚC khi đọc body (audit P0-1/L-2/L-3).
+    Secret rỗng ⇒ 503 (KHÔNG BAO GIỜ verify HMAC bằng key rỗng — attacker tự
+    tính được digest). Delivery-id rỗng ⇒ 400 (nó là dedup key G2; chuỗi rỗng
+    hợp lệ sẽ chiếm slot ('github','') vĩnh viễn). Body quá lớn ⇒ 413."""
+    if not secret:
+        raise HTTPException(status_code=503, detail="webhook secret not configured")
+    if not delivery_id:
+        raise HTTPException(status_code=400, detail="missing X-GitHub-Delivery")
+    if content_length is not None and content_length.isdigit() and int(content_length) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="payload too large")
+
+
 @app.post("/webhooks/github")
 async def github_webhook(
     request: Request,
@@ -138,6 +152,7 @@ async def github_webhook(
     x_github_delivery: str = Header(""),
     x_github_event: str = Header(""),
 ):
+    check_webhook_guards(GITHUB_SECRET, x_github_delivery, request.headers.get("content-length"))
     body = await request.body()
 
     # --- G1: HMAC verify (constant-time, chống giả mạo) -----------------
