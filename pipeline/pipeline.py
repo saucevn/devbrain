@@ -33,6 +33,7 @@ import hmac
 import json
 import os
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -41,6 +42,7 @@ from anthropic import AsyncAnthropic
 from arq import cron
 from arq.connections import RedisSettings
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pgvector.asyncpg import register_vector
 from pydantic import BaseModel, Field
 
@@ -111,25 +113,36 @@ def advisory_key(name: str) -> int:
 # =====================================================================
 # ENTRYPOINT 1 — WEBHOOK RECEIVER  (gate G1 + G2, ACK nhanh)
 # =====================================================================
-app = FastAPI()
-
-
-@app.on_event("startup")
-async def _startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Thay @app.on_event('startup') (deprecated từ FastAPI 0.93)."""
     app.state.pool = await make_pool()
     from arq import create_pool as arq_pool
     app.state.arq = await arq_pool(RedisSettings.from_dsn(REDIS_URL))
+    yield
+    await app.state.pool.close()
+
+
+# H-5: không expose swagger/openapi qua Cloudflare tunnel.
+app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+
+
+def health_payload(db_ok: bool) -> tuple[int, dict]:
+    """DB chết ⇒ 503 để probe theo status-code thấy được outage (trước đây
+    luôn trả 200 {'ok': True} kể cả khi DB down)."""
+    return (200 if db_ok else 503), {"ok": db_ok, "db": db_ok}
 
 
 @app.get("/health")
-async def health():
+async def health() -> JSONResponse:
     """Liveness/readiness cho receiver. Ping DB rẻ; ACK thừa sức < 10s."""
     db_ok = False
     try:
         db_ok = await app.state.pool.fetchval("select 1") == 1
     except Exception:
         db_ok = False
-    return {"ok": True, "db": db_ok}
+    code, body = health_payload(db_ok)
+    return JSONResponse(status_code=code, content=body)
 
 
 def check_webhook_guards(secret: bytes, delivery_id: str, content_length: str | None) -> None:

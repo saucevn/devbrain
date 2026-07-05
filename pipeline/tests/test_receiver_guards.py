@@ -32,3 +32,21 @@ def test_guards_pass_normal_request():
     pipeline.check_webhook_guards(b"secret", "d-1", "12345")
     pipeline.check_webhook_guards(b"secret", "d-1", None)          # no content-length header
     pipeline.check_webhook_guards(b"secret", "d-1", "not-a-number")  # garbage header ignored
+
+
+# ---- /health must speak status codes (probes don't parse bodies) ----------
+def test_health_payload_ok():
+    assert pipeline.health_payload(True) == (200, {"ok": True, "db": True})
+
+
+def test_health_payload_db_down_is_503():
+    code, body = pipeline.health_payload(False)
+    assert code == 503
+    assert body == {"ok": False, "db": False}
+
+
+def test_fastapi_docs_disabled():
+    # H-5: swagger/openapi must not be served through the Cloudflare tunnel
+    assert pipeline.app.docs_url is None
+    assert pipeline.app.redoc_url is None
+    assert pipeline.app.openapi_url is None
