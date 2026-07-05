@@ -443,7 +443,10 @@ end $$;
 --
 --   -- Sau đó worker tự đọc từ seq 0, replay toàn bộ event → dựng lại graph.
 --   -- Tương tự cho 'metrics' (truncate metrics_daily), 'embeddings'
---   -- (truncate embeddings + re-embed), 'narrative' (truncate narratives).
+--   -- (truncate embeddings + re-embed), 'narrative' (truncate narratives),
+--   -- 'status' (truncate entity_status_history — có natural key từ 005 nên
+--   -- reset cursor mà quên truncate cũng KHÔNG double-count, nhưng truncate
+--   -- vẫn là đường sạch).
 --
 -- Vì events bất biến và còn nguyên, bạn rebuild được BẤT KỲ projection nào,
 -- BAO NHIÊU lần tùy thích, mà không mất dữ liệu gốc. Đó là toàn bộ sức
