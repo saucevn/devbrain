@@ -28,17 +28,20 @@ Phụ thuộc: fastapi, uvicorn, arq, asyncpg, pgvector, anthropic, httpx, pydan
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import os
+import random
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Literal
 
 import asyncpg
-from anthropic import AsyncAnthropic
+import httpx
+from anthropic import APIStatusError, AsyncAnthropic
 from arq import cron
 from arq.connections import RedisSettings
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -71,7 +74,7 @@ MAX_BODY_BYTES = 10 * 1024 * 1024   # GitHub tự cap payload 25MB; ta chặn s�
 
 PROJECTORS = ("metrics", "graph", "narrative", "status")   # mỗi cái có cursor riêng
 
-anthropic = AsyncAnthropic(api_key=ANTHROPIC_KEY)
+anthropic = AsyncAnthropic(api_key=ANTHROPIC_KEY, max_retries=4)
 
 
 # =====================================================================
@@ -384,6 +387,37 @@ PR_SYSTEM_PROMPT = (
 
 
 # =====================================================================
+# RETRY / POISON POLICY  (P1-4: 1 lỗi 429 không được ghim cursor mãi mãi)
+# =====================================================================
+class PoisonEvent(Exception):
+    """Event mà AI lane không bao giờ xử lý được (vd PR đã bị xoá → 404).
+    maybe_summarize bắt nó → return None → cursor đi tiếp; event vẫn nằm
+    nguyên trong log nên một lần replay sau (logic mới) vẫn nhặt lại được."""
+
+
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+POISON_STATUS = {404, 410, 422}
+
+
+async def with_retries(fn, *, attempts: int = 4, base_delay: float = 1.0):
+    """Exponential backoff + jitter cho HTTP call (Gemini/GitHub). Status
+    poison ⇒ PoisonEvent ngay; status khác ngoài RETRYABLE ⇒ raise nguyên."""
+    for attempt in range(attempts):
+        try:
+            return await fn()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status in POISON_STATUS:
+                raise PoisonEvent(f"http {status}: {e.request.url}") from e
+            if status not in RETRYABLE_STATUS or attempt == attempts - 1:
+                raise
+        except httpx.TransportError:
+            if attempt == attempts - 1:
+                raise
+        await asyncio.sleep(base_delay * (2 ** attempt) + random.random() * 0.2)
+
+
+# =====================================================================
 # AI CALLS  (C3 model tiering · C6 prompt caching · structured via tool_use)
 # =====================================================================
 _ALLOWED_KINDS = {"module", "file", "service", "feature", "epic", "doc"}
@@ -455,20 +489,22 @@ async def embed(text: str, task_type: str = "RETRIEVAL_DOCUMENT") -> list[float]
     vector(EMBED_DIM) trong schema (VN+EN multilingual). task_type:
     RETRIEVAL_DOCUMENT khi lưu, RETRIEVAL_QUERY khi search. Dims <3072 nên
     normalize về unit length cho cosine (<=>)."""
-    import httpx
-    async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent",
-            params={"key": os.environ["GEMINI_API_KEY"]},
-            json={
-                "model": "models/gemini-embedding-001",
-                "content": {"parts": [{"text": text}]},
-                "taskType": task_type,
-                "outputDimensionality": EMBED_DIM,
-            },
-        )
-        r.raise_for_status()
-        return _normalize(_parse_gemini_embedding(r.json()))
+    async def _call() -> dict:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent",
+                params={"key": os.environ["GEMINI_API_KEY"]},
+                json={
+                    "model": "models/gemini-embedding-001",
+                    "content": {"parts": [{"text": text}]},
+                    "taskType": task_type,
+                    "outputDimensionality": EMBED_DIM,
+                },
+            )
+            r.raise_for_status()
+            return r.json()
+
+    return _normalize(_parse_gemini_embedding(await with_retries(_call)))
 
 
 def _parse_gemini_embedding(data: dict) -> list[float]:
@@ -675,20 +711,30 @@ async def apply_status(conn, ev, version):
 
 # ---- AI projector (đắt, đã lọc + cache) ------------------------------
 async def maybe_summarize(pool, ev, version: int):
-    """Trả (analysis, input_hash, embedding) hoặc None.
-    G4/C5: nếu input_hash đã tồn tại ⇒ SKIP luôn LLM (cache hit)."""
+    """Trả (analysis, input_hash, embedding, enriched) hoặc None.
+    G4/C5: nếu input_hash đã tồn tại ⇒ SKIP luôn LLM (cache hit).
+    PoisonEvent ⇒ log + None: cursor đi tiếp, event nằm lại log chờ replay."""
     if not passes_ai_gate(ev):                      # C1 funnel
         return None
-    enriched = await enrich_pr_payload(ev["payload"])   # diff/files/issues qua GitHub API (ngoài tx)
-    pr = parse_pr(enriched)
-    ih = sha256(str(PROMPT_VERSION), pr["title"], pr.get("body", ""), pr["diff"][:DIFF_CHAR_CAP])
+    try:
+        enriched = await enrich_pr_payload(ev["payload"])   # diff/files/issues qua GitHub API (ngoài tx)
+        pr = parse_pr(enriched)
+        ih = sha256(str(PROMPT_VERSION), pr["title"], pr.get("body", ""), pr["diff"][:DIFF_CHAR_CAP])
 
-    exists = await pool.fetchval("select 1 from narratives where input_hash=$1 limit 1", ih)
-    if exists:                                       # C5: đã tóm tắt input y hệt → khỏi trả tiền lại
+        exists = await pool.fetchval("select 1 from narratives where input_hash=$1 limit 1", ih)
+        if exists:                                   # C5: đã tóm tắt input y hệt → khỏi trả tiền lại
+            return None
+
+        analysis = await summarize_pr(pr)            # ← LLM call duy nhất (Haiku, SDK tự retry)
+        vec = await embed(analysis.summary_md)       # embed bản summary (rẻ hơn embed cả diff)
+    except PoisonEvent as e:
+        print(f"[ai-lane] poison event seq={ev['seq']}: {e} — skipping")
         return None
-
-    analysis = await summarize_pr(pr)                # ← LLM call duy nhất (Haiku)
-    vec = await embed(analysis.summary_md)           # embed bản summary (rẻ hơn embed cả diff)
+    except APIStatusError as e:
+        if e.status_code in POISON_STATUS:
+            print(f"[ai-lane] poison event seq={ev['seq']}: anthropic {e.status_code} — skipping")
+            return None
+        raise
     return analysis, ih, vec, enriched
 
 
@@ -813,7 +859,6 @@ def _build_enriched_pr(payload: dict, files: list[dict], diff: str, issues: list
 async def enrich_pr_payload(payload: dict) -> dict:
     """Webhook PR thiếu diff/files → fetch qua GitHub API. Trả BẢN SAO đã
     enrich; thiếu repo/number thì trả nguyên payload."""
-    import httpx
     pr = payload.get("pull_request") or {}
     repo = (payload.get("repository") or {}).get("full_name")
     number = pr.get("number")
@@ -822,14 +867,17 @@ async def enrich_pr_payload(payload: dict) -> dict:
     token = os.environ.get("GITHUB_TOKEN", "")
     auth = {"Authorization": f"Bearer {token}"} if token else {}
     base = f"https://api.github.com/repos/{repo}/pulls/{number}"
-    async with httpx.AsyncClient(timeout=30) as c:
-        fr = await c.get(f"{base}/files", params={"per_page": 100},
-                         headers={**auth, "Accept": "application/vnd.github+json"})
-        fr.raise_for_status()
-        files = fr.json()
-        dr = await c.get(base, headers={**auth, "Accept": "application/vnd.github.v3.diff"})
-        dr.raise_for_status()
-        diff = dr.text
+
+    async def _fetch() -> tuple[list[dict], str]:
+        async with httpx.AsyncClient(timeout=30) as c:
+            fr = await c.get(f"{base}/files", params={"per_page": 100},
+                             headers={**auth, "Accept": "application/vnd.github+json"})
+            fr.raise_for_status()
+            dr = await c.get(base, headers={**auth, "Accept": "application/vnd.github.v3.diff"})
+            dr.raise_for_status()
+            return fr.json(), dr.text
+
+    files, diff = await with_retries(_fetch)
     return _build_enriched_pr(payload, files, diff, extract_linked_issues(pr.get("body")))
 
 
