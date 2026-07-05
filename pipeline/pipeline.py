@@ -546,6 +546,11 @@ async def run_one_projector(pool: asyncpg.Pool, name: str):
             cp = await pool.fetchrow(
                 "select last_seq, logic_version from projection_checkpoints where projector_name=$1", name
             )
+            if cp is None:
+                # Migration seed cho projector này chưa được áp (vd 'status'
+                # chỉ seed ở 003) → skip êm thay vì TypeError mỗi sweep.
+                print(f"[sweep] projector '{name}' has no checkpoint row; skipping (apply migrations)")
+                return
             rows = await pool.fetch(
                 """
                 select seq, id, source, source_event_id, event_type, actor, source_url, payload, occurred_at
@@ -563,6 +568,7 @@ async def process_event(pool, name: str, ev, version: int):
     """G3: write projection + advance cursor trong CÙNG 1 transaction →
     crash giữa chừng không double-count (footgun #1 của event-sourcing)."""
 
+    precomputed = None
     if name == "narrative":
         # AI lane: LLM call PHẢI ở NGOÀI transaction (network). Hàm này tự
         # cache-skip (G4/C5) và trả None nếu bị filter/đã có.
@@ -598,8 +604,8 @@ async def apply_metrics(conn, ev):
         adds, dels = file_churn(ev["payload"], path)
         await conn.execute(
             """
-            insert into metrics_daily (entity_id, day, commit_count, lines_added, lines_removed)
-            values ($1, $2, 1, $3, $4)
+            insert into metrics_daily (entity_id, day, commit_count, lines_added, lines_removed, derived_by)
+            values ($1, $2, 1, $3, $4, 'git')
             on conflict (entity_id, day) do update
               set commit_count = metrics_daily.commit_count + 1,
                   lines_added  = metrics_daily.lines_added  + excluded.lines_added,
@@ -658,8 +664,10 @@ async def apply_status(conn, ev, version):
     eid = await upsert_entity(conn, "epic", f"milestone:{repo}#{number}", ms.get("title") or f"#{number}", repo)
     await conn.execute(
         """
-        insert into entity_status_history (entity_id, status, changed_at, source_event_id)
-        values ($1, $2, $3, $4)
+        insert into entity_status_history (entity_id, status, changed_at, source_event_id, derived_by)
+        values ($1, $2, $3, $4, 'git')
+        on conflict (entity_id, source_event_id) where source_event_id is not null
+          do nothing
         """,
         eid, status, ev["occurred_at"], ev["id"],
     )
@@ -727,8 +735,8 @@ async def apply_narrative(conn, ev, version: int, analysis: PRAnalysis, input_ha
     nid = await conn.fetchval(
         """
         insert into narratives (scope, scope_ref, title, body_md, highlights, source_event_ids,
-                                model, derived_by_version, input_hash, period_start, period_end)
-        values ('pr', $1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+                                model, derived_by, derived_by_version, input_hash, period_start, period_end)
+        values ('pr', $1, $2, $3, $4, $5, $6, 'ai', $7, $8, $9, $9)
         on conflict (scope, scope_ref, derived_by_version) do update
           set body_md=excluded.body_md, highlights=excluded.highlights, input_hash=excluded.input_hash
         returning id
@@ -750,8 +758,8 @@ async def apply_narrative(conn, ev, version: int, analysis: PRAnalysis, input_ha
     await conn.execute(
         """
         insert into embeddings (source_kind, source_id, content, embedding, occurred_at,
-                                derived_by_version, content_hash)
-        values ('pr_summary', $1, $2, $3, $4, $5, $6)
+                                derived_by, derived_by_version, content_hash)
+        values ('pr_summary', $1, $2, $3, $4, 'ai', $5, $6)
         on conflict (source_kind, source_id, derived_by_version) do update
           set embedding=excluded.embedding, content=excluded.content, content_hash=excluded.content_hash
         """,
@@ -835,8 +843,16 @@ def file_churn(payload: dict, path: str) -> tuple[int, int]:
 # =====================================================================
 # ARQ WORKER SETTINGS
 # =====================================================================
-async def on_startup(ctx):
+async def on_startup(ctx: dict) -> None:
     ctx["pool"] = await make_pool()
+    # Self-heal: mỗi projector trong PROJECTORS phải có checkpoint row —
+    # code và migration không được phép drift (P1-3).
+    async with ctx["pool"].acquire() as conn:
+        for name in PROJECTORS:
+            await conn.execute(
+                "insert into projection_checkpoints (projector_name) values ($1) on conflict do nothing",
+                name,
+            )
 
 
 async def on_shutdown(ctx):
