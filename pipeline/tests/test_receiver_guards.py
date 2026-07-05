@@ -50,3 +50,19 @@ def test_fastapi_docs_disabled():
     assert pipeline.app.docs_url is None
     assert pipeline.app.redoc_url is None
     assert pipeline.app.openapi_url is None
+
+
+# ---- fail-fast secrets: worker phải chết lúc boot, không phải lúc event AI đầu tiên
+def test_require_env_raises_listing_missing(monkeypatch):
+    monkeypatch.delenv("X_AUDIT_A", raising=False)
+    monkeypatch.setenv("X_AUDIT_B", "set")
+    with pytest.raises(RuntimeError) as ei:
+        pipeline.require_env("X_AUDIT_A", "X_AUDIT_B")
+    assert "X_AUDIT_A" in str(ei.value)
+    assert "X_AUDIT_B" not in str(ei.value)
+
+
+def test_require_env_passes_when_all_set(monkeypatch):
+    monkeypatch.setenv("X_AUDIT_A", "1")
+    monkeypatch.setenv("X_AUDIT_B", "2")
+    pipeline.require_env("X_AUDIT_A", "X_AUDIT_B")

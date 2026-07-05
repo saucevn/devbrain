@@ -32,6 +32,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import random
 import re
@@ -73,6 +74,19 @@ DIFF_CHAR_CAP  = 12_000       # cắt diff để khống chế token (C2/C5)
 MAX_BODY_BYTES = 10 * 1024 * 1024   # GitHub tự cap payload 25MB; ta chặn sớm ở 10MB
 
 PROJECTORS = ("metrics", "graph", "narrative", "status")   # mỗi cái có cursor riêng
+
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
+                    format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("pipeline")
+
+
+def require_env(*names: str) -> None:
+    """Fail-fast lúc boot: thiếu secret thì chết to & sớm, không phải chết
+    âm thầm ở event AI đầu tiên sau nhiều giờ chạy (P1-7)."""
+    missing = [n for n in names if not os.environ.get(n)]
+    if missing:
+        raise RuntimeError(f"missing required env: {', '.join(missing)}")
+
 
 anthropic = AsyncAnthropic(api_key=ANTHROPIC_KEY, max_retries=4)
 
@@ -119,6 +133,7 @@ def advisory_key(name: str) -> int:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Thay @app.on_event('startup') (deprecated từ FastAPI 0.93)."""
+    require_env("GITHUB_WEBHOOK_SECRET")
     app.state.pool = await make_pool()
     from arq import create_pool as arq_pool
     app.state.arq = await arq_pool(RedisSettings.from_dsn(REDIS_URL))
@@ -174,6 +189,7 @@ async def github_webhook(
     # --- G1: HMAC verify (constant-time, chống giả mạo) -----------------
     digest = "sha256=" + hmac.new(GITHUB_SECRET, body, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(digest, x_hub_signature_256):
+        logger.warning("webhook HMAC verification failed (delivery=%s)", x_github_delivery)
         raise HTTPException(status_code=401, detail="bad signature")
 
     payload = await request.json()
@@ -585,7 +601,7 @@ async def run_one_projector(pool: asyncpg.Pool, name: str):
             if cp is None:
                 # Migration seed cho projector này chưa được áp (vd 'status'
                 # chỉ seed ở 003) → skip êm thay vì TypeError mỗi sweep.
-                print(f"[sweep] projector '{name}' has no checkpoint row; skipping (apply migrations)")
+                logger.warning("projector '%s' has no checkpoint row; skipping (apply migrations)", name)
                 return
             rows = await pool.fetch(
                 """
@@ -728,11 +744,11 @@ async def maybe_summarize(pool, ev, version: int):
         analysis = await summarize_pr(pr)            # ← LLM call duy nhất (Haiku, SDK tự retry)
         vec = await embed(analysis.summary_md)       # embed bản summary (rẻ hơn embed cả diff)
     except PoisonEvent as e:
-        print(f"[ai-lane] poison event seq={ev['seq']}: {e} — skipping")
+        logger.warning("ai-lane poison event seq=%s: %s — skipping", ev["seq"], e)
         return None
     except APIStatusError as e:
         if e.status_code in POISON_STATUS:
-            print(f"[ai-lane] poison event seq={ev['seq']}: anthropic {e.status_code} — skipping")
+            logger.warning("ai-lane poison event seq=%s: anthropic %s — skipping", ev["seq"], e.status_code)
             return None
         raise
     return analysis, ih, vec, enriched
@@ -892,6 +908,7 @@ def file_churn(payload: dict, path: str) -> tuple[int, int]:
 # ARQ WORKER SETTINGS
 # =====================================================================
 async def on_startup(ctx: dict) -> None:
+    require_env("ANTHROPIC_API_KEY", "GEMINI_API_KEY")
     ctx["pool"] = await make_pool()
     # Self-heal: mỗi projector trong PROJECTORS phải có checkpoint row —
     # code và migration không được phép drift (P1-3).
