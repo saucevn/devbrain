@@ -356,6 +356,10 @@ const stripFor = (a: string) =>
   `case when ${a}.project is not null and ${a}.canonical_key like ${a}.project || ':%' ` +
   `then substr(${a}.canonical_key, length(${a}.project) + 2) else ${a}.canonical_key end`;
 
+// U3/P1-8: escape LIKE/ILIKE metacharacters in user input — '?q=%' would
+// otherwise match every row and silently seed an arbitrary entity.
+const escapeLike = (s: string) => s.replace(/[\\%_]/g, "\\$&");
+
 export function getSubgraph(seed?: string, cap = 18): Promise<Subgraph> {
   return safe(async () => {
     // Resolve the seed: explicit query (key / path basename / display name),
@@ -365,9 +369,9 @@ export function getSubgraph(seed?: string, cap = 18): Promise<Subgraph> {
           await pool.query(
             `select e.id, ${STRIP} as key, e.display_name as name
              from entities e
-             where (${STRIP}) = $1 or e.display_name ilike $1 or e.canonical_key like '%/' || $1
+             where (${STRIP}) = $1 or e.display_name ilike $2 or e.canonical_key like '%/' || $2
              order by e.last_seen_at desc limit 1`,
-            [seed]
+            [seed, escapeLike(seed)]
           )
         ).rows[0]
       : (
