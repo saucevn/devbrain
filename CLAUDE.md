@@ -111,7 +111,7 @@ aws s3 cp s3://$R2_BUCKET/backups/<file>.sql.gz - --endpoint-url $R2_ENDPOINT | 
 
 ## Current state & build order
 
-Status (2026-06-25): **Phases 0–3 shipped · live ingest · multi-project namespace.**
+Status (2026-07-06): **Phases 0–3 shipped · live ingest · multi-project namespace · security/robustness hardened + CI.**
 
 1. ✅ **Phase 0** — foundation: `docker compose up` green, schema applied, webhook stores events.
 2. ✅ **Phase 1** — `backfill.py` + metrics + co-change projectors + Next.js dashboard (**$0 LLM**).
@@ -120,7 +120,7 @@ Status (2026-06-25): **Phases 0–3 shipped · live ingest · multi-project name
 5. **Phase 4** — knowledge graph (subgraph-by-query; **build last**). ← *next*
 6. **Phase 5** — Sonnet rollup diary + cost/monitoring + replay runbook.
 
-Also done: **multi-project namespace** (entities `{repo}:{path}` + `entities.project`, migration 004) · §5 co-change cap · §7.6 transport-independent commit identity (`source='git'`/sha). Live: Cloudflare Tunnel (`dev.hira.vn`) → receiver; GitHub webhook (push/pull_request/release/milestone). Migrations now **000→004**.
+Also done: **multi-project namespace** (entities `{repo}:{path}` + `entities.project`, migration 004) · §5 co-change cap · §7.6 transport-independent commit identity (`source='git'`/sha) · **security/robustness hardening** (migration 005: TRUNCATE guard, idempotent status projector, `derived_by` on every projection, indexes/CHECKs; fail-closed webhook; backup integrity; retry/poison AI lane; non-root containers — see PROJECT_PLAN.md §11 + `IMPROVEMENT_PLAN.md`) · **CI** (`.github/workflows/ci.yml`: ruff + pytest w/ real Postgres, web build + typecheck, every PR). Live: Cloudflare Tunnel (`dev.hira.vn`) → receiver; GitHub webhook (push/pull_request/release/milestone). Migrations now **000→005** (⚠️ apply 005 BEFORE deploying the code that reads `derived_by`).
 
 **Embedding provider — RESOLVED (Gemini):** `gemini-embedding-001` @ `output_dimensionality=1536`, L2-normalized; `RETRIEVAL_DOCUMENT` to index, `RETRIEVAL_QUERY` to search. Matches the existing `vector(1536)` → **no migration**. `embed()` already uses it (Phase 2A). STOP-AND-ASK still applies before any *schema* change.
 
