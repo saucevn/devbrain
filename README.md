@@ -42,6 +42,63 @@ security/robustness hardened + CI on every PR.
 
 **Next:** Phase 4 knowledge graph · Phase 5 Sonnet rollup + ops · Lark/docs ingest.
 
+## Architecture
+
+Everything an app knows flows into one **immutable `events` log**; every view is a
+**derived projection** rebuilt from that log. The receiver only appends and ACKs
+fast; a worker sweeps the log past a per-projector cursor and splits each event into
+two lanes — a cheap deterministic one (runs on every event, no LLM) and a gated AI
+one (only merged PRs / releases / docs). The Next.js dashboard reads the projection
+tables directly.
+
+```mermaid
+flowchart TB
+    GH["GitHub webhook<br/>push · PR · release · milestone"]
+    BF["backfill.py<br/>(git history)"]
+
+    GH -->|"HMAC verify · fail-closed · ACK &lt;10s"| RCV["FastAPI receiver<br/>idempotent append"]
+    BF --> RCV
+
+    RCV --> EV[("events<br/>immutable · append-only<br/>single source of truth")]
+    EV --> Q{{"ARQ + Redis<br/>debounced sweep"}}
+    Q --> W["Worker · per-projector cursor<br/>(cursor + logic_version)"]
+
+    W --> DET
+    W --> AI
+
+    subgraph DET["Deterministic lane — every event · $0 LLM"]
+        direction LR
+        M["metrics_daily"]
+        EE["entity_edges<br/>co_changed_with"]
+        SH["entity_status_history"]
+    end
+
+    subgraph AI["AI lane — gated: pr.merged / release / doc.updated"]
+        direction LR
+        EN["enrich<br/>GitHub API"] --> HK["Haiku<br/>summarize"] --> NAR["narratives"]
+        HK --> GM["Gemini<br/>embed"] --> EMB["embeddings<br/>pgvector 1536"]
+    end
+
+    DET --> DASH["Next.js dashboard<br/>Server Components query Postgres · ISR"]
+    AI --> DASH
+
+    EV -. pg_dump .-> R2[("R2 backup")]
+```
+
+Two invariants hold the whole thing together:
+
+- **`events` is append-only** (DB triggers reject UPDATE/DELETE/TRUNCATE) → any
+  projection is **replayable**: bump `logic_version`, clear the table, reset the
+  cursor, and the worker rebuilds it from `seq = 0`. Losing the local DB is
+  recoverable because most events originate from GitHub.
+- **Human-curated data is _not_ a projection** — `pyramid_blocks`, confirmed
+  entity names, status notes can't be re-derived, so they're what the **R2 backup**
+  protects and replay never touches.
+
+The receiver + dashboard sit behind **Cloudflare Tunnel + Access** (no public IP);
+the AI lane runs **outside** the DB transaction (network I/O), while each projection
+write and its cursor advance commit **together** so a crash can't double-count.
+
 ## Stack
 
 - **Backend:** Python 3.12 · FastAPI (receiver) · ARQ + Redis (worker) · asyncpg (no ORM) · Pydantic v2 · Anthropic (Haiku/Sonnet)
