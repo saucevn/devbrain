@@ -19,6 +19,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+RUN useradd --system --create-home --uid 10001 app \
+    && chown -R app:app /app
+USER app
+
 EXPOSE 8000
 
 # Default to the receiver; compose overrides this for the worker.

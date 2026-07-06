@@ -12,4 +12,5 @@ RUN chmod +x /usr/local/bin/backup.sh
 # Loop trong entrypoint (KHÔNG dùng cron) → kế thừa full env của container,
 # tránh footgun "cron strip env". Backup chạy NGAY khi start (verify được
 # liền), rồi lặp mỗi BACKUP_INTERVAL giây.
+USER postgres
 ENTRYPOINT ["/bin/sh", "-c", "while true; do /usr/local/bin/backup.sh || echo '[backup] FAILED'; sleep \"${BACKUP_INTERVAL:-86400}\"; done"]
