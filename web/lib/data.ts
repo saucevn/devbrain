@@ -191,11 +191,14 @@ export function getProposedEntities(limit = 50, project?: string): Promise<Propo
   return safe(async () => {
     const { rows } = await pool.query(
       `select e.id, e.entity_kind, ${STRIP} as canonical_key, e.display_name, e.last_seen_at,
-              count(c.id)::int as touches
+              -- U5: 'touches' đo cả 2 lane. contributions chỉ do AI lane ghi →
+              -- entity đề xuất từ lane deterministic luôn 0 (misleading khi
+              -- người dùng quyết định confirm/reject). Cộng thêm commit_count.
+              ((select count(*) from contributions c where c.entity_id = e.id)
+               + coalesce((select sum(m.commit_count) from metrics_daily m where m.entity_id = e.id), 0)
+              )::int as touches
        from entities e
-       left join contributions c on c.entity_id = e.id
        where e.resolution_status = 'proposed' and ($2::text is null or e.project = $2)
-       group by e.id
        order by e.last_seen_at desc
        limit $1`,
       [limit, project ?? null]
