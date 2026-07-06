@@ -4,9 +4,9 @@
 
 | | |
 |---|---|
-| **Phiên bản** | 0.2 |
-| **Ngày** | 2026-06-25 |
-| **Trạng thái** | ✅ **Phases 0–3 shipped** · live ingest (Cloudflare Tunnel + GitHub webhook/milestone) · multi-project namespace. Kế: Phase 4 graph · Phase 5 rollup+ops · Lark/docs ingest. (Deep-dive P2/P3 đã hợp nhất ở Phụ lục cuối file.) |
+| **Phiên bản** | 0.3 |
+| **Ngày** | 2026-07-06 |
+| **Trạng thái** | ✅ **Phases 0–3 shipped** · live ingest (Cloudflare Tunnel + GitHub webhook/milestone) · multi-project namespace · **security/robustness hardened + CI** (migration `005`, [PR #8](https://github.com/saucevn/devbrain/pull/8)). Kế: Phase 4 graph · Phase 5 rollup+ops · Lark/docs ingest. (Deep-dive P2/P3 đã hợp nhất ở Phụ lục cuối file.) |
 | **Hạ tầng nền** | Docker Compose all-in-one (VPS *hoặc* Mac) · Cloudflare Tunnel · Postgres local + backup R2 |
 
 ---
@@ -177,7 +177,7 @@ Image đều multi-arch nên chuyển host = copy `.env` sang máy mới rồi `
 
 ## 6. Lộ trình theo phase
 
-> **Tiến độ (2026-06-25):** ✅ Phase 0 · ✅ Phase 1 · ✅ Phase 2 (A narrative+Gemini · B search · C entity-confirm) · ✅ Phase 3 (rich pyramid + roadmap milestones) · ✅ live ingest · ✅ multi-project namespace · ✅ §5 co-change cap · ✅ §7.6 commit identity. ⏳ Phase 4 graph · Phase 5 rollup+ops · Lark/docs ingest.
+> **Tiến độ (2026-07-06):** ✅ Phase 0 · ✅ Phase 1 · ✅ Phase 2 (A narrative+Gemini · B search · C entity-confirm) · ✅ Phase 3 (rich pyramid + roadmap milestones) · ✅ live ingest · ✅ multi-project namespace · ✅ §5 co-change cap · ✅ §7.6 commit identity · ✅ **security/robustness hardening + CI** (xem §11). ⏳ Phase 4 graph · Phase 5 rollup+ops · Lark/docs ingest.
 
 Nguyên tắc thứ tự: **làm cái hữu ích trước cái long lanh**. Event log + dashboard deterministic chạy được *trước khi* tốn một đồng LLM nào. Graph 3D làm **cuối cùng**, sau khi entity resolution đã chắc.
 
@@ -256,7 +256,25 @@ Nguyên tắc thứ tự: **làm cái hữu ích trước cái long lanh**. Even
 
 ---
 
-*Plan này hợp nhất toàn bộ thiết kế qua các vòng: schema event-sourced, pipeline queue/filter/structured-output, và stack + deploy all-in-one. Artifact kèm theo: `001_schema.sql`, `002_idempotency.sql`, `000_local_roles.sql`, `pipeline.py`, `docker-compose.yml`, `backup/Dockerfile`, `backup/backup.sh`, `.env.example`.*
+## 11. Security & robustness hardening + CI (2026-07-06)
+
+Sau audit toàn repo, một loạt fix P0/P1 đã ship ([PR #8](https://github.com/saucevn/devbrain/pull/8)) + CI ([PR #9](https://github.com/saucevn/devbrain/pull/9)). Tất cả **additive — không cần replay**. Báo cáo audit đầy đủ: `IMPROVEMENT_PLAN.md`; kế hoạch thực thi: `docs/superpowers/plans/2026-07-05-audit-fixes.md`.
+
+**P0 (chặn poison event-store / mất dữ liệu):**
+- **Webhook fail-closed** — `GITHUB_WEBHOOK_SECRET` rỗng trước đây khiến HMAC verify pass với mọi payload (empty-key HMAC tính được) → giờ 503 khi chưa cấu hình; chặn thêm delivery-id rỗng (400) + body quá cỡ (413).
+- **Backup toàn vẹn** — `pg_dump | gzip` dưới `/bin/sh` (không `pipefail`) từng upload gzip rỗng ~20B khi dump lỗi → tách pipe + verify `gzip -t` + size trước upload, fail non-zero.
+- **`events` TRUNCATE guard** — trigger append-only trước chỉ bắt UPDATE/DELETE; migration `005` thêm statement-level TRUNCATE trigger (chặn cả đường `CASCADE` của replay gõ nhầm).
+- **Status projector idempotent** — `apply_status` từng dùng bare INSERT không natural key → reset cursor là double-count roadmap; giờ partial unique index + `ON CONFLICT DO NOTHING`.
+
+**P1:** migration `005` (index khớp query thật, `derived_by` trên **mọi** projection theo golden rule #4, CHECK constraints) · retry/backoff + poison-event skip cho AI lane (1 lỗi 429 / PR đã xoá không ghim cursor) · structured logging + `require_env` fail-fast lúc boot · compose hardening (web bind loopback, Redis `requirepass`, pin cloudflared digest, non-root containers) · web fixes (validate `confirmEntity` + error boundary, escape ILIKE ở graph/MCP, stat cards theo project **U2**, `touches` đếm cả lane deterministic **U5**, env guards + pool timeouts, `safeUrl` protocol check).
+
+**Migrations giờ 000→005.** ⚠️ **Ordering rollout load-bearing:** `005` PHẢI áp **trước** khi deploy image pipeline mới — các projector INSERT giờ tham chiếu cột `derived_by` + conflict target chỉ tồn tại sau `005`; deploy trước là mọi INSERT metrics/status/narrative lỗi `column "derived_by" does not exist` (to & không hỏng dữ liệu, nhưng lane dừng tiến). Trình tự đầy đủ ở Rollout của plan thực thi.
+
+**CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml), chạy mọi PR + push `main`): job **pipeline** = `ruff check` + `pytest` với Postgres `pgvector:pg16` thật (áp `000→005` + re-apply `005` canh idempotency → chạy cả DB-integration test); job **web** = `next build` (không env — canh bất biến "không throw ở module scope") + `tsc --noEmit`.
+
+---
+
+*Plan này hợp nhất toàn bộ thiết kế qua các vòng: schema event-sourced, pipeline queue/filter/structured-output, và stack + deploy all-in-one. Artifact kèm theo: `001_schema.sql`, `002_idempotency.sql`, `005_hardening.sql`, `000_local_roles.sql`, `pipeline.py`, `docker-compose.yml`, `backup/Dockerfile`, `backup/backup.sh`, `.env.example`, `.github/workflows/ci.yml`.*
 
 
 ---
