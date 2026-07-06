@@ -1,0 +1,96 @@
+# CI: chạy trên mọi PR + push lên main.
+# - pipeline: ruff + pytest; job có Postgres (pgvector) thật → áp migrations
+#   000→005 rồi chạy cả DB-integration test (test_status_idempotent_db).
+#   Re-apply 005 để giữ bất biến "migration idempotent".
+# - web: npm ci → next build → tsc --noEmit (build chạy trước để sinh .next
+#   types mà tsconfig include; build KHÔNG cần env — data.ts cố tình không
+#   throw ở module scope, CI cũng canh giữ luôn tính chất đó).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    name: pipeline · ruff + pytest (unit + db)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 15433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pipeline/requirements.txt
+            pipeline/requirements-dev.txt
+
+      - name: Install deps
+        run: pip install -r pipeline/requirements-dev.txt
+
+      - name: Lint (ruff check)
+        run: ruff check pipeline/
+
+      - name: Apply migrations 000→005 (thứ tự alphabet, như init-scripts)
+        env:
+          PGPASSWORD: test
+        run: |
+          for f in supabase/migrations/*.sql; do
+            echo "== $f"
+            psql -h 127.0.0.1 -p 15433 -U postgres -d postgres -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+      - name: Re-apply 005 (idempotency guard)
+        env:
+          PGPASSWORD: test
+        run: psql -h 127.0.0.1 -p 15433 -U postgres -d postgres -v ON_ERROR_STOP=1 -q -f supabase/migrations/005_hardening.sql
+
+      - name: Tests (unit + db integration)
+        working-directory: pipeline
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:test@127.0.0.1:15433/postgres
+        run: python -m pytest tests/ -q
+
+  web:
+    name: web · build + typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build (không cần env — module scope không được throw)
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run build
+
+      - name: Typecheck
+        run: npx tsc --noEmit
