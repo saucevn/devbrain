@@ -2,9 +2,21 @@ import { Pool } from "pg";
 
 // Reuse one pool across HMR reloads in dev.
 const g = globalThis as unknown as { _pgPool?: Pool };
+// KHÔNG throw ở module scope: `next build` trong Docker image chạy không có
+// env → throw sẽ phá build. Cảnh báo to, và pool fail nhanh thay vì treo.
+if (!process.env.DATABASE_URL) {
+  console.error("[data] DATABASE_URL is not set — every query will fail");
+}
 const pool =
   g._pgPool ??
-  new Pool({ connectionString: process.env.DATABASE_URL, max: 5 });
+  new Pool({
+    connectionString: process.env.DATABASE_URL,
+    max: 5,
+    // M6: khi 5 connection đều bận, query mới phải fail nhanh (safe() đỡ)
+    // thay vì treo request handler vô hạn.
+    connectionTimeoutMillis: 3000,
+    idleTimeoutMillis: 30000,
+  });
 if (process.env.NODE_ENV !== "production") g._pgPool = pool;
 
 // SQL fragment: strip the '{project}:' namespace prefix for display.
@@ -119,6 +131,7 @@ export function getCoChanges(limit = 16, project?: string): Promise<CoChange[]> 
 // ---- Phase 2B: semantic search -------------------------------------------
 async function embedQuery(text: string): Promise<number[]> {
   const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("GEMINI_API_KEY is not set"); // safe() bắt → kết quả rỗng; không gửi 'key=undefined' ra ngoài
   const res = await fetch(
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=" + key,
     {
