@@ -1,4 +1,4 @@
-import { getChangelog, type ChangelogEntry } from "@/lib/data";
+import { getChangelog, safeUrl, type ChangelogEntry } from "@/lib/data";
 
 export const dynamic = "force-dynamic";
 
@@ -35,6 +35,7 @@ export default async function Changelog() {
 }
 
 function Entry({ e }: { e: ChangelogEntry }) {
+  const url = safeUrl(e.sourceUrl);
   return (
     <article className="lift rounded-xl panel-glass px-5 py-4">
       <div className="flex items-center justify-between gap-3 font-mono text-[11px]">
@@ -43,8 +44,8 @@ function Entry({ e }: { e: ChangelogEntry }) {
           {e.project && <span className="text-muted">{e.project}</span>}
           {e.pr && <span className="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-accent">{e.pr}</span>}
         </div>
-        {e.sourceUrl && (
-          <a href={e.sourceUrl} target="_blank" rel="noreferrer" className="text-accent hover:underline">source ↗</a>
+        {url && (
+          <a href={url} target="_blank" rel="noreferrer" className="text-accent hover:underline">source ↗</a>
         )}
       </div>
 

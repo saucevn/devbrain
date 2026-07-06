@@ -1,4 +1,4 @@
-import { getRoadmap, type RoadmapItem } from "@/lib/data";
+import { getRoadmap, safeUrl, type RoadmapItem } from "@/lib/data";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +46,7 @@ export default async function Roadmap() {
 }
 
 function Item({ it }: { it: RoadmapItem }) {
+  const url = safeUrl(it.evidenceUrl);
   return (
     <li className="relative flex items-center justify-between gap-3 rounded-md border border-line bg-panel px-3 py-2">
       <span className="absolute -left-[23px] h-2 w-2 rounded-full bg-accent" aria-hidden />
@@ -53,7 +54,7 @@ function Item({ it }: { it: RoadmapItem }) {
       <div className="flex shrink-0 items-center gap-2 font-mono text-[11px]">
         <span className={`rounded-sm border px-1.5 py-0.5 ${STATUS[it.status] ?? "border-line text-muted"}`}>{it.status}</span>
         <span className="text-muted">{it.changedAt}</span>
-        {it.evidenceUrl && <a href={it.evidenceUrl} target="_blank" rel="noreferrer" className="text-accent hover:underline">↗</a>}
+        {url && <a href={url} target="_blank" rel="noreferrer" className="text-accent hover:underline">↗</a>}
       </div>
     </li>
   );

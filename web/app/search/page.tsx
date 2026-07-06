@@ -1,4 +1,4 @@
-import { searchBrain, type SearchHit } from "@/lib/data";
+import { searchBrain, safeUrl, type SearchHit } from "@/lib/data";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +53,7 @@ export default async function Search({
 function Hit({ h }: { h: SearchHit }) {
   const pct = Math.round(h.similarity * 100);
   const pr = h.scope === "pr" && h.scopeRef ? `PR #${String(h.scopeRef).split("#").pop()} · ` : "";
+  const url = safeUrl(h.sourceUrl);
   return (
     <li className="lift overflow-hidden rounded-xl panel-glass">
       <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
@@ -62,8 +63,8 @@ function Hit({ h }: { h: SearchHit }) {
       <p className="prose-serif px-4 py-3 text-[15px] text-muted">{h.content.slice(0, 240)}</p>
       <div className="flex items-center justify-between gap-3 px-4 pb-3 font-mono text-[11px] text-muted">
         <span>{h.occurredAt ?? ""}</span>
-        {h.sourceUrl && (
-          <a href={h.sourceUrl} target="_blank" rel="noreferrer" className="text-accent hover:underline">open source ↗</a>
+        {url && (
+          <a href={url} target="_blank" rel="noreferrer" className="text-accent hover:underline">open source ↗</a>
         )}
       </div>
     </li>

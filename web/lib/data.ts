@@ -33,6 +33,12 @@ async function safe<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
   }
 }
 
+// M1: events.source_url / evidence_url render thẳng vào <a href>. Một event
+// bị poison (xem P0-1) có thể mang 'javascript:' URL — chỉ cho http(s) qua.
+export function safeUrl(u: string | null): string | undefined {
+  return u && /^https?:\/\//i.test(u) ? u : undefined;
+}
+
 export type Summary = { events: number; entities: number; edges: number; lastEvent: string | null };
 export type HotFile = {
   key: string;
