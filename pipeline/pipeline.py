@@ -38,7 +38,7 @@ import random
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Literal
 
 import asyncpg
 import httpx
