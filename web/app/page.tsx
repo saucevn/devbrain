@@ -46,7 +46,7 @@ export default async function Home({
 }) {
   const { project } = await searchParams;
   const [summary, projects, hot, co] = await Promise.all([
-    getSummary(),
+    getSummary(project),
     getProjects(),
     getHotFiles(28, project),
     getCoChanges(16, project),

@@ -42,15 +42,23 @@ export function getProjects(): Promise<string[]> {
   }, []);
 }
 
-export function getSummary(): Promise<Summary> {
+export function getSummary(project?: string): Promise<Summary> {
   return safe(
     async () => {
+      // U2: 4 ô stat hero phải theo project chip như heat grid. Events mang
+      // repo trong payload; entities/edges qua entities.project.
       const { rows } = await pool.query(
         `select
-           (select count(*) from events)::int        as events,
-           (select count(*) from entities)::int      as entities,
-           (select count(*) from entity_edges)::int  as edges,
-           (select max(occurred_at) from events)     as last_event`
+           (select count(*) from events
+             where $1::text is null or payload -> 'repository' ->> 'full_name' = $1)::int as events,
+           (select count(*) from entities
+             where $1::text is null or project = $1)::int as entities,
+           (select count(*) from entity_edges ed
+             join entities ef on ef.id = ed.from_entity
+             where $1::text is null or ef.project = $1)::int as edges,
+           (select max(occurred_at) from events
+             where $1::text is null or payload -> 'repository' ->> 'full_name' = $1) as last_event`,
+        [project ?? null]
       );
       const r = rows[0];
       return {
