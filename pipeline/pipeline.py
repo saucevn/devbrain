@@ -138,6 +138,8 @@ async def lifespan(app: FastAPI):
     from arq import create_pool as arq_pool
     app.state.arq = await arq_pool(RedisSettings.from_dsn(REDIS_URL))
     yield
+    # ArqRedis kế thừa redis.asyncio.Redis; aclose() là API không-deprecated (redis-py>=5).
+    await app.state.arq.aclose()
     await app.state.pool.close()
 
 
