@@ -37,3 +37,17 @@ def test_format_hit_drops_null_citations_and_missing_pr():
     hit = brain_mcp._format_hit(0.9, "t", "s", None, [None, "u", None])
     assert hit["pr"] is None
     assert hit["citations"] == ["u"]
+
+
+# ---- audit M-3 / L-4: unbounded limit + raw LIKE wildcards from MCP input ---
+def test_clamp_limit_bounds():
+    assert brain_mcp._clamp_limit(1_000_000) == brain_mcp.MAX_LIMIT
+    assert brain_mcp._clamp_limit(0) == 1
+    assert brain_mcp._clamp_limit(-5) == 1
+    assert brain_mcp._clamp_limit(8) == 8
+
+
+def test_escape_like_metacharacters():
+    assert brain_mcp._escape_like("100%_done") == "100\\%\\_done"
+    assert brain_mcp._escape_like("a\\b") == "a\\\\b"
+    assert brain_mcp._escape_like("plain") == "plain"

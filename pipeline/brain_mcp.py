@@ -60,12 +60,26 @@ def _format_hit(similarity: float, title: str, summary: str,
     }
 
 
+MAX_LIMIT = 100  # M-3: MCP client có thể truyền limit=10^6 → DoS DB
+
+
+def _clamp_limit(limit: int) -> int:
+    return max(1, min(int(limit), MAX_LIMIT))
+
+
+def _escape_like(s: str) -> str:
+    """L-4: escape LIKE/ILIKE metachar từ input MCP (mặc định Postgres dùng
+    backslash làm escape char nên không cần ESCAPE clause)."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 # ---------------------------------------------------------------------
 # TOOLS (plain async fns; registered in build_server so they stay testable)
 # ---------------------------------------------------------------------
 async def search_brain(query: str, limit: int = 8) -> list[dict]:
     """Semantic search the dev second-brain (merged-PR & doc narratives).
     Returns ranked summaries each with source citations to verify."""
+    limit = _clamp_limit(limit)
     pool = await _get_pool()
     vec = await embed(query, "RETRIEVAL_QUERY")
     rows = await pool.fetch(
@@ -95,18 +109,19 @@ async def get_context(entity: str, limit: int = 10) -> dict:
     """Everything the brain knows about an entity (file / module / feature /
     epic): the matched entity, co-change & AI neighbors, and the narratives
     that touched it. Accepts a file path, module prefix, or display name."""
+    limit = _clamp_limit(limit)
     pool = await _get_pool()
     matches = await pool.fetch(
         """
         select id, entity_kind, canonical_key, display_name, project, pyramid_layer
         from entities
         where canonical_key = $1                 -- exact key
-           or canonical_key like '%:' || $1      -- exact path within a project ('repo:path')
-           or canonical_key like '%/' || $1      -- basename of a namespaced path
-           or display_name ilike $1              -- AI/curated display name
+           or canonical_key like '%:' || $2      -- exact path within a project ('repo:path')
+           or canonical_key like '%/' || $2      -- basename of a namespaced path
+           or display_name ilike $2              -- AI/curated display name
         order by last_seen_at desc limit 5
         """,
-        entity,
+        entity, _escape_like(entity),
     )
     if not matches:
         return {"query": entity, "found": False,
@@ -124,12 +139,14 @@ async def get_context(entity: str, limit: int = 10) -> dict:
         """,
         eid, limit,
     )
+    others = await pool.fetch(
+        "select id, display_name, canonical_key, entity_kind from entities where id = any($1::uuid[])",
+        [n["other"] for n in neighbor_rows],
+    )
+    by_id = {o["id"]: o for o in others}
     neighbors: list[dict] = []
     for n in neighbor_rows:
-        o = await pool.fetchrow(
-            "select display_name, canonical_key, entity_kind from entities where id = $1",
-            n["other"],
-        )
+        o = by_id.get(n["other"])
         if o:
             neighbors.append({
                 "name": o["display_name"], "key": _strip_project(o["canonical_key"]),

@@ -28,19 +28,25 @@ Phụ thuộc: fastapi, uvicorn, arq, asyncpg, pgvector, anthropic, httpx, pydan
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
+import random
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Literal
 
 import asyncpg
-from anthropic import AsyncAnthropic
+import httpx
+from anthropic import APIStatusError, AsyncAnthropic
 from arq import cron
 from arq.connections import RedisSettings
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pgvector.asyncpg import register_vector
 from pydantic import BaseModel, Field
 
@@ -65,10 +71,24 @@ EMBED_DIM      = 1536                           # PHẢI khớp vector(N) trong 
 SWEEP_BATCH    = 200          # số event đọc mỗi lượt sweep
 DEBOUNCE_SEC   = 30           # gom nhiều webhook trong cửa sổ này thành 1 sweep
 DIFF_CHAR_CAP  = 12_000       # cắt diff để khống chế token (C2/C5)
+MAX_BODY_BYTES = 10 * 1024 * 1024   # GitHub tự cap payload 25MB; ta chặn sớm ở 10MB
 
 PROJECTORS = ("metrics", "graph", "narrative", "status")   # mỗi cái có cursor riêng
 
-anthropic = AsyncAnthropic(api_key=ANTHROPIC_KEY)
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
+                    format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("pipeline")
+
+
+def require_env(*names: str) -> None:
+    """Fail-fast lúc boot: thiếu secret thì chết to & sớm, không phải chết
+    âm thầm ở event AI đầu tiên sau nhiều giờ chạy (P1-7)."""
+    missing = [n for n in names if not os.environ.get(n)]
+    if missing:
+        raise RuntimeError(f"missing required env: {', '.join(missing)}")
+
+
+anthropic = AsyncAnthropic(api_key=ANTHROPIC_KEY, max_retries=4)
 
 
 # =====================================================================
@@ -110,25 +130,52 @@ def advisory_key(name: str) -> int:
 # =====================================================================
 # ENTRYPOINT 1 — WEBHOOK RECEIVER  (gate G1 + G2, ACK nhanh)
 # =====================================================================
-app = FastAPI()
-
-
-@app.on_event("startup")
-async def _startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Thay @app.on_event('startup') (deprecated từ FastAPI 0.93)."""
+    require_env("GITHUB_WEBHOOK_SECRET")
     app.state.pool = await make_pool()
     from arq import create_pool as arq_pool
     app.state.arq = await arq_pool(RedisSettings.from_dsn(REDIS_URL))
+    yield
+    # ArqRedis kế thừa redis.asyncio.Redis; aclose() là API không-deprecated (redis-py>=5).
+    await app.state.arq.aclose()
+    await app.state.pool.close()
+
+
+# H-5: không expose swagger/openapi qua Cloudflare tunnel.
+app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+
+
+def health_payload(db_ok: bool) -> tuple[int, dict]:
+    """DB chết ⇒ 503 để probe theo status-code thấy được outage (trước đây
+    luôn trả 200 {'ok': True} kể cả khi DB down)."""
+    return (200 if db_ok else 503), {"ok": db_ok, "db": db_ok}
 
 
 @app.get("/health")
-async def health():
+async def health() -> JSONResponse:
     """Liveness/readiness cho receiver. Ping DB rẻ; ACK thừa sức < 10s."""
     db_ok = False
     try:
         db_ok = await app.state.pool.fetchval("select 1") == 1
     except Exception:
         db_ok = False
-    return {"ok": True, "db": db_ok}
+    code, body = health_payload(db_ok)
+    return JSONResponse(status_code=code, content=body)
+
+
+def check_webhook_guards(secret: bytes, delivery_id: str, content_length: str | None) -> None:
+    """Fail-closed guards chạy TRƯỚC khi đọc body (audit P0-1/L-2/L-3).
+    Secret rỗng ⇒ 503 (KHÔNG BAO GIỜ verify HMAC bằng key rỗng — attacker tự
+    tính được digest). Delivery-id rỗng ⇒ 400 (nó là dedup key G2; chuỗi rỗng
+    hợp lệ sẽ chiếm slot ('github','') vĩnh viễn). Body quá lớn ⇒ 413."""
+    if not secret:
+        raise HTTPException(status_code=503, detail="webhook secret not configured")
+    if not delivery_id:
+        raise HTTPException(status_code=400, detail="missing X-GitHub-Delivery")
+    if content_length is not None and content_length.isdigit() and int(content_length) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="payload too large")
 
 
 @app.post("/webhooks/github")
@@ -138,11 +185,13 @@ async def github_webhook(
     x_github_delivery: str = Header(""),
     x_github_event: str = Header(""),
 ):
+    check_webhook_guards(GITHUB_SECRET, x_github_delivery, request.headers.get("content-length"))
     body = await request.body()
 
     # --- G1: HMAC verify (constant-time, chống giả mạo) -----------------
     digest = "sha256=" + hmac.new(GITHUB_SECRET, body, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(digest, x_hub_signature_256):
+        logger.warning("webhook HMAC verification failed (delivery=%s)", x_github_delivery)
         raise HTTPException(status_code=401, detail="bad signature")
 
     payload = await request.json()
@@ -356,6 +405,37 @@ PR_SYSTEM_PROMPT = (
 
 
 # =====================================================================
+# RETRY / POISON POLICY  (P1-4: 1 lỗi 429 không được ghim cursor mãi mãi)
+# =====================================================================
+class PoisonEvent(Exception):
+    """Event mà AI lane không bao giờ xử lý được (vd PR đã bị xoá → 404).
+    maybe_summarize bắt nó → return None → cursor đi tiếp; event vẫn nằm
+    nguyên trong log nên một lần replay sau (logic mới) vẫn nhặt lại được."""
+
+
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+POISON_STATUS = {404, 410, 422}
+
+
+async def with_retries(fn, *, attempts: int = 4, base_delay: float = 1.0):
+    """Exponential backoff + jitter cho HTTP call (Gemini/GitHub). Status
+    poison ⇒ PoisonEvent ngay; status khác ngoài RETRYABLE ⇒ raise nguyên."""
+    for attempt in range(attempts):
+        try:
+            return await fn()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status in POISON_STATUS:
+                raise PoisonEvent(f"http {status}: {e.request.url}") from e
+            if status not in RETRYABLE_STATUS or attempt == attempts - 1:
+                raise
+        except httpx.TransportError:
+            if attempt == attempts - 1:
+                raise
+        await asyncio.sleep(base_delay * (2 ** attempt) + random.random() * 0.2)
+
+
+# =====================================================================
 # AI CALLS  (C3 model tiering · C6 prompt caching · structured via tool_use)
 # =====================================================================
 _ALLOWED_KINDS = {"module", "file", "service", "feature", "epic", "doc"}
@@ -427,20 +507,22 @@ async def embed(text: str, task_type: str = "RETRIEVAL_DOCUMENT") -> list[float]
     vector(EMBED_DIM) trong schema (VN+EN multilingual). task_type:
     RETRIEVAL_DOCUMENT khi lưu, RETRIEVAL_QUERY khi search. Dims <3072 nên
     normalize về unit length cho cosine (<=>)."""
-    import httpx
-    async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent",
-            params={"key": os.environ["GEMINI_API_KEY"]},
-            json={
-                "model": "models/gemini-embedding-001",
-                "content": {"parts": [{"text": text}]},
-                "taskType": task_type,
-                "outputDimensionality": EMBED_DIM,
-            },
-        )
-        r.raise_for_status()
-        return _normalize(_parse_gemini_embedding(r.json()))
+    async def _call() -> dict:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent",
+                params={"key": os.environ["GEMINI_API_KEY"]},
+                json={
+                    "model": "models/gemini-embedding-001",
+                    "content": {"parts": [{"text": text}]},
+                    "taskType": task_type,
+                    "outputDimensionality": EMBED_DIM,
+                },
+            )
+            r.raise_for_status()
+            return r.json()
+
+    return _normalize(_parse_gemini_embedding(await with_retries(_call)))
 
 
 def _parse_gemini_embedding(data: dict) -> list[float]:
@@ -518,6 +600,11 @@ async def run_one_projector(pool: asyncpg.Pool, name: str):
             cp = await pool.fetchrow(
                 "select last_seq, logic_version from projection_checkpoints where projector_name=$1", name
             )
+            if cp is None:
+                # Migration seed cho projector này chưa được áp (vd 'status'
+                # chỉ seed ở 003) → skip êm thay vì TypeError mỗi sweep.
+                logger.warning("projector '%s' has no checkpoint row; skipping (apply migrations)", name)
+                return
             rows = await pool.fetch(
                 """
                 select seq, id, source, source_event_id, event_type, actor, source_url, payload, occurred_at
@@ -535,6 +622,7 @@ async def process_event(pool, name: str, ev, version: int):
     """G3: write projection + advance cursor trong CÙNG 1 transaction →
     crash giữa chừng không double-count (footgun #1 của event-sourcing)."""
 
+    precomputed = None
     if name == "narrative":
         # AI lane: LLM call PHẢI ở NGOÀI transaction (network). Hàm này tự
         # cache-skip (G4/C5) và trả None nếu bị filter/đã có.
@@ -570,8 +658,8 @@ async def apply_metrics(conn, ev):
         adds, dels = file_churn(ev["payload"], path)
         await conn.execute(
             """
-            insert into metrics_daily (entity_id, day, commit_count, lines_added, lines_removed)
-            values ($1, $2, 1, $3, $4)
+            insert into metrics_daily (entity_id, day, commit_count, lines_added, lines_removed, derived_by)
+            values ($1, $2, 1, $3, $4, 'git')
             on conflict (entity_id, day) do update
               set commit_count = metrics_daily.commit_count + 1,
                   lines_added  = metrics_daily.lines_added  + excluded.lines_added,
@@ -630,8 +718,10 @@ async def apply_status(conn, ev, version):
     eid = await upsert_entity(conn, "epic", f"milestone:{repo}#{number}", ms.get("title") or f"#{number}", repo)
     await conn.execute(
         """
-        insert into entity_status_history (entity_id, status, changed_at, source_event_id)
-        values ($1, $2, $3, $4)
+        insert into entity_status_history (entity_id, status, changed_at, source_event_id, derived_by)
+        values ($1, $2, $3, $4, 'git')
+        on conflict (entity_id, source_event_id) where source_event_id is not null
+          do nothing
         """,
         eid, status, ev["occurred_at"], ev["id"],
     )
@@ -639,20 +729,30 @@ async def apply_status(conn, ev, version):
 
 # ---- AI projector (đắt, đã lọc + cache) ------------------------------
 async def maybe_summarize(pool, ev, version: int):
-    """Trả (analysis, input_hash, embedding) hoặc None.
-    G4/C5: nếu input_hash đã tồn tại ⇒ SKIP luôn LLM (cache hit)."""
+    """Trả (analysis, input_hash, embedding, enriched) hoặc None.
+    G4/C5: nếu input_hash đã tồn tại ⇒ SKIP luôn LLM (cache hit).
+    PoisonEvent ⇒ log + None: cursor đi tiếp, event nằm lại log chờ replay."""
     if not passes_ai_gate(ev):                      # C1 funnel
         return None
-    enriched = await enrich_pr_payload(ev["payload"])   # diff/files/issues qua GitHub API (ngoài tx)
-    pr = parse_pr(enriched)
-    ih = sha256(str(PROMPT_VERSION), pr["title"], pr.get("body", ""), pr["diff"][:DIFF_CHAR_CAP])
+    try:
+        enriched = await enrich_pr_payload(ev["payload"])   # diff/files/issues qua GitHub API (ngoài tx)
+        pr = parse_pr(enriched)
+        ih = sha256(str(PROMPT_VERSION), pr["title"], pr.get("body", ""), pr["diff"][:DIFF_CHAR_CAP])
 
-    exists = await pool.fetchval("select 1 from narratives where input_hash=$1 limit 1", ih)
-    if exists:                                       # C5: đã tóm tắt input y hệt → khỏi trả tiền lại
+        exists = await pool.fetchval("select 1 from narratives where input_hash=$1 limit 1", ih)
+        if exists:                                   # C5: đã tóm tắt input y hệt → khỏi trả tiền lại
+            return None
+
+        analysis = await summarize_pr(pr)            # ← LLM call duy nhất (Haiku, SDK tự retry)
+        vec = await embed(analysis.summary_md)       # embed bản summary (rẻ hơn embed cả diff)
+    except PoisonEvent as e:
+        logger.warning("ai-lane poison event seq=%s: %s — skipping", ev["seq"], e)
         return None
-
-    analysis = await summarize_pr(pr)                # ← LLM call duy nhất (Haiku)
-    vec = await embed(analysis.summary_md)           # embed bản summary (rẻ hơn embed cả diff)
+    except APIStatusError as e:
+        if e.status_code in POISON_STATUS:
+            logger.warning("ai-lane poison event seq=%s: anthropic %s — skipping", ev["seq"], e.status_code)
+            return None
+        raise
     return analysis, ih, vec, enriched
 
 
@@ -699,8 +799,8 @@ async def apply_narrative(conn, ev, version: int, analysis: PRAnalysis, input_ha
     nid = await conn.fetchval(
         """
         insert into narratives (scope, scope_ref, title, body_md, highlights, source_event_ids,
-                                model, derived_by_version, input_hash, period_start, period_end)
-        values ('pr', $1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+                                model, derived_by, derived_by_version, input_hash, period_start, period_end)
+        values ('pr', $1, $2, $3, $4, $5, $6, 'ai', $7, $8, $9, $9)
         on conflict (scope, scope_ref, derived_by_version) do update
           set body_md=excluded.body_md, highlights=excluded.highlights, input_hash=excluded.input_hash
         returning id
@@ -722,8 +822,8 @@ async def apply_narrative(conn, ev, version: int, analysis: PRAnalysis, input_ha
     await conn.execute(
         """
         insert into embeddings (source_kind, source_id, content, embedding, occurred_at,
-                                derived_by_version, content_hash)
-        values ('pr_summary', $1, $2, $3, $4, $5, $6)
+                                derived_by, derived_by_version, content_hash)
+        values ('pr_summary', $1, $2, $3, $4, 'ai', $5, $6)
         on conflict (source_kind, source_id, derived_by_version) do update
           set embedding=excluded.embedding, content=excluded.content, content_hash=excluded.content_hash
         """,
@@ -777,7 +877,6 @@ def _build_enriched_pr(payload: dict, files: list[dict], diff: str, issues: list
 async def enrich_pr_payload(payload: dict) -> dict:
     """Webhook PR thiếu diff/files → fetch qua GitHub API. Trả BẢN SAO đã
     enrich; thiếu repo/number thì trả nguyên payload."""
-    import httpx
     pr = payload.get("pull_request") or {}
     repo = (payload.get("repository") or {}).get("full_name")
     number = pr.get("number")
@@ -786,14 +885,17 @@ async def enrich_pr_payload(payload: dict) -> dict:
     token = os.environ.get("GITHUB_TOKEN", "")
     auth = {"Authorization": f"Bearer {token}"} if token else {}
     base = f"https://api.github.com/repos/{repo}/pulls/{number}"
-    async with httpx.AsyncClient(timeout=30) as c:
-        fr = await c.get(f"{base}/files", params={"per_page": 100},
-                         headers={**auth, "Accept": "application/vnd.github+json"})
-        fr.raise_for_status()
-        files = fr.json()
-        dr = await c.get(base, headers={**auth, "Accept": "application/vnd.github.v3.diff"})
-        dr.raise_for_status()
-        diff = dr.text
+
+    async def _fetch() -> tuple[list[dict], str]:
+        async with httpx.AsyncClient(timeout=30) as c:
+            fr = await c.get(f"{base}/files", params={"per_page": 100},
+                             headers={**auth, "Accept": "application/vnd.github+json"})
+            fr.raise_for_status()
+            dr = await c.get(base, headers={**auth, "Accept": "application/vnd.github.v3.diff"})
+            dr.raise_for_status()
+            return fr.json(), dr.text
+
+    files, diff = await with_retries(_fetch)
     return _build_enriched_pr(payload, files, diff, extract_linked_issues(pr.get("body")))
 
 
@@ -807,8 +909,17 @@ def file_churn(payload: dict, path: str) -> tuple[int, int]:
 # =====================================================================
 # ARQ WORKER SETTINGS
 # =====================================================================
-async def on_startup(ctx):
+async def on_startup(ctx: dict) -> None:
+    require_env("ANTHROPIC_API_KEY", "GEMINI_API_KEY")
     ctx["pool"] = await make_pool()
+    # Self-heal: mỗi projector trong PROJECTORS phải có checkpoint row —
+    # code và migration không được phép drift (P1-3).
+    async with ctx["pool"].acquire() as conn:
+        for name in PROJECTORS:
+            await conn.execute(
+                "insert into projection_checkpoints (projector_name) values ($1) on conflict do nothing",
+                name,
+            )
 
 
 async def on_shutdown(ctx):

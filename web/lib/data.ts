@@ -2,9 +2,21 @@ import { Pool } from "pg";
 
 // Reuse one pool across HMR reloads in dev.
 const g = globalThis as unknown as { _pgPool?: Pool };
+// KHÔNG throw ở module scope: `next build` trong Docker image chạy không có
+// env → throw sẽ phá build. Cảnh báo to, và pool fail nhanh thay vì treo.
+if (!process.env.DATABASE_URL) {
+  console.error("[data] DATABASE_URL is not set — every query will fail");
+}
 const pool =
   g._pgPool ??
-  new Pool({ connectionString: process.env.DATABASE_URL, max: 5 });
+  new Pool({
+    connectionString: process.env.DATABASE_URL,
+    max: 5,
+    // M6: khi 5 connection đều bận, query mới phải fail nhanh (safe() đỡ)
+    // thay vì treo request handler vô hạn.
+    connectionTimeoutMillis: 3000,
+    idleTimeoutMillis: 30000,
+  });
 if (process.env.NODE_ENV !== "production") g._pgPool = pool;
 
 // SQL fragment: strip the '{project}:' namespace prefix for display.
@@ -19,6 +31,12 @@ async function safe<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
     console.error("[data] query failed:", e);
     return fallback;
   }
+}
+
+// M1: events.source_url / evidence_url render thẳng vào <a href>. Một event
+// bị poison (xem P0-1) có thể mang 'javascript:' URL — chỉ cho http(s) qua.
+export function safeUrl(u: string | null): string | undefined {
+  return u && /^https?:\/\//i.test(u) ? u : undefined;
 }
 
 export type Summary = { events: number; entities: number; edges: number; lastEvent: string | null };
@@ -42,15 +60,23 @@ export function getProjects(): Promise<string[]> {
   }, []);
 }
 
-export function getSummary(): Promise<Summary> {
+export function getSummary(project?: string): Promise<Summary> {
   return safe(
     async () => {
+      // U2: 4 ô stat hero phải theo project chip như heat grid. Events mang
+      // repo trong payload; entities/edges qua entities.project.
       const { rows } = await pool.query(
         `select
-           (select count(*) from events)::int        as events,
-           (select count(*) from entities)::int      as entities,
-           (select count(*) from entity_edges)::int  as edges,
-           (select max(occurred_at) from events)     as last_event`
+           (select count(*) from events
+             where $1::text is null or payload -> 'repository' ->> 'full_name' = $1)::int as events,
+           (select count(*) from entities
+             where $1::text is null or project = $1)::int as entities,
+           (select count(*) from entity_edges ed
+             join entities ef on ef.id = ed.from_entity
+             where $1::text is null or ef.project = $1)::int as edges,
+           (select max(occurred_at) from events
+             where $1::text is null or payload -> 'repository' ->> 'full_name' = $1) as last_event`,
+        [project ?? null]
       );
       const r = rows[0];
       return {
@@ -111,6 +137,7 @@ export function getCoChanges(limit = 16, project?: string): Promise<CoChange[]> 
 // ---- Phase 2B: semantic search -------------------------------------------
 async function embedQuery(text: string): Promise<number[]> {
   const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("GEMINI_API_KEY is not set"); // safe() bắt → kết quả rỗng; không gửi 'key=undefined' ra ngoài
   const res = await fetch(
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=" + key,
     {
@@ -183,11 +210,14 @@ export function getProposedEntities(limit = 50, project?: string): Promise<Propo
   return safe(async () => {
     const { rows } = await pool.query(
       `select e.id, e.entity_kind, ${STRIP} as canonical_key, e.display_name, e.last_seen_at,
-              count(c.id)::int as touches
+              -- U5: 'touches' đo cả 2 lane. contributions chỉ do AI lane ghi →
+              -- entity đề xuất từ lane deterministic luôn 0 (misleading khi
+              -- người dùng quyết định confirm/reject). Cộng thêm commit_count.
+              ((select count(*) from contributions c where c.entity_id = e.id)
+               + coalesce((select sum(m.commit_count) from metrics_daily m where m.entity_id = e.id), 0)
+              )::int as touches
        from entities e
-       left join contributions c on c.entity_id = e.id
        where e.resolution_status = 'proposed' and ($2::text is null or e.project = $2)
-       group by e.id
        order by e.last_seen_at desc
        limit $1`,
       [limit, project ?? null]
@@ -356,6 +386,10 @@ const stripFor = (a: string) =>
   `case when ${a}.project is not null and ${a}.canonical_key like ${a}.project || ':%' ` +
   `then substr(${a}.canonical_key, length(${a}.project) + 2) else ${a}.canonical_key end`;
 
+// U3/P1-8: escape LIKE/ILIKE metacharacters in user input — '?q=%' would
+// otherwise match every row and silently seed an arbitrary entity.
+const escapeLike = (s: string) => s.replace(/[\\%_]/g, "\\$&");
+
 export function getSubgraph(seed?: string, cap = 18): Promise<Subgraph> {
   return safe(async () => {
     // Resolve the seed: explicit query (key / path basename / display name),
@@ -365,9 +399,9 @@ export function getSubgraph(seed?: string, cap = 18): Promise<Subgraph> {
           await pool.query(
             `select e.id, ${STRIP} as key, e.display_name as name
              from entities e
-             where (${STRIP}) = $1 or e.display_name ilike $1 or e.canonical_key like '%/' || $1
+             where (${STRIP}) = $1 or e.display_name ilike $2 or e.canonical_key like '%/' || $2
              order by e.last_seen_at desc limit 1`,
-            [seed]
+            [seed, escapeLike(seed)]
           )
         ).rows[0]
       : (
