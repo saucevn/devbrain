@@ -1608,11 +1608,13 @@ git commit -m "fix(web): only render http(s) urls from db-sourced link fields"
 
 ## Rollout (HUMAN-GATED — do not execute as part of the tasks)
 
-Execute in order after all tasks are merged; each step touches the live stack:
+Execute in order after all tasks are merged; each step touches the live stack.
+
+> **⚠️ ORDERING IS LOAD-BEARING — migration 005 MUST be applied (step 2) BEFORE the new pipeline image runs (step 3).** The updated projector INSERTs (`apply_metrics`, `apply_status`, `apply_narrative`) now name the `derived_by` column and the `entity_status_hist_natural_key` conflict target that only exist after 005. Deploy the new image against a DB that hasn't had 005 applied and **every metrics/status/narrative INSERT fails** with `column "derived_by" does not exist` (loud: the transaction aborts and the cursor does not advance — no data corruption or double-count, but the lane stops making progress until 005 is applied). Do NOT run step 3 before step 2 succeeds.
 
 1. Add `REDIS_PASSWORD=<openssl rand -hex 16>` to the live `.env`.
-2. Apply the migration: `docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < supabase/migrations/005_hardening.sql` (idempotent; additive; no replay needed).
-3. Rebuild + restart: `docker compose up -d --build` (and `--profile frontend` if self-hosting web).
+2. Apply the migration: `docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < supabase/migrations/005_hardening.sql` (idempotent; additive; no replay needed). Verify it applied: `\d metrics_daily` should show the `derived_by` column before proceeding.
+3. Rebuild + restart: `docker compose up -d --build` (and `--profile frontend` if self-hosting web). **Only after step 2 is confirmed.**
 4. Smoke: `/health` → 200; forged bad-signature webhook → 401 + a `pipeline` warning log; `truncate events` in psql → error; `/graph?q=%` → empty state; `/?project=<repo>` stats change with the chip; `/entities` shows non-zero touches.
 5. Watch one backup cycle: `docker compose logs backup` shows `done` with a plausible size, and the new R2 object is > 1 KB.
 
